@@ -1,0 +1,22 @@
+[Unit]
+Description=Fry Networks External API Service
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/fry-external-api
+Environment=PATH=/opt/fry-external-api/.venv/bin
+Environment=PORT=8080
+Environment=HOST=0.0.0.0
+Environment=UVICORN_RELOAD=false
+ExecStart=/opt/fry-external-api/.venv/bin/python app.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fry-external-api
+
+[Install]
+WantedBy=multi-user.target

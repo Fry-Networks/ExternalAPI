@@ -239,11 +239,12 @@ if __name__ == "__main__":
 
     # Allow runtime configuration via environment variables.
     # PORT - port number (defaults to 8080)
-    # HOST - host to bind (defaults to 0.0.0.0)
-    # UVICORN_RELOAD - if set to '1' or 'true' (case-insensitive), enable reload
+    # HOST - host to bind (defaults to 0.0.0.0 for production)
+    # UVICORN_RELOAD - if set to '1' or 'true' (case-insensitive), enable reload (disabled by default for production)
     port = int(os.getenv("PORT", "8080"))
     host = os.getenv("HOST", "0.0.0.0")
-    reload_env = os.getenv("UVICORN_RELOAD", "true").lower()
+    reload_env = os.getenv("UVICORN_RELOAD", "false").lower()
     reload_flag = reload_env in ("1", "true", "yes")
 
+    print(f"[ExternalAPI] Starting server on {host}:{port} (reload={reload_flag})")
     uvicorn.run("app:app", host=host, port=port, reload=reload_flag)
