@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  fry-external-api:
+  hardware_exe_api:
     build: .
     ports:
       - "8080:8080"
@@ -13,7 +13,7 @@ services:
       - .env
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/miners/health-check"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3

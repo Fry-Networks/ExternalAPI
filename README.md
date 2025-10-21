@@ -16,7 +16,7 @@ ExternalAPI/
     ├── deploy.sh            # Automated VPS deployment script
     ├── quick-deploy.sh      # One-liner deployment script
     ├── ecosystem.config.js  # PM2 process manager configuration
-    ├── fry-external-api.service # Systemd service definition
+   ├── hardware_exe_api.service # Systemd service definition (install as /etc/systemd/system/hardware_exe_api.service)
     ├── Dockerfile          # Docker container definition
     └── docker-compose.yml  # Docker Compose configuration
 ```
@@ -44,18 +44,18 @@ python -m uvicorn app:app --reload --host 127.0.0.1 --port 8080
 
 1. **Upload files to your VPS:**
    ```bash
-   # On your VPS, create temporary directory
-   mkdir -p /tmp/fry-external-api
+   # On your VPS, create temporary directory (quick deploy location)
+   mkdir -p /tmp/hardware_exe_api
    
    # Upload all files (use scp, rsync, or git clone)
-   scp -r ./* user@your-vps:/tmp/fry-external-api/
+   scp -r ./* user@your-vps:/tmp/hardware_exe_api/
    # OR clone from git
-   git clone https://github.com/Fry-Foundation/ExternalAPI.git /tmp/fry-external-api
+   git clone https://github.com/Fry-Foundation/ExternalAPI.git /tmp/hardware_exe_api
    ```
 
 2. **Run the deployment script:**
    ```bash
-   cd /tmp/fry-external-api
+   cd /tmp/hardware_exe_api
    chmod +x deployment/deploy.sh
    sudo ./deployment/deploy.sh
    ```
@@ -63,13 +63,13 @@ python -m uvicorn app:app --reload --host 127.0.0.1 --port 8080
 3. **Configure your environment:**
    ```bash
    # Edit production configuration
-   sudo nano /opt/fry-external-api/.env
+   sudo nano /opt/hardware_exe_api/.env
    
    # Update nginx server name
-   sudo nano /etc/nginx/sites-available/fry-external-api
+   sudo nano /etc/nginx/sites-available/hardware_exe_api
    
    # Restart services
-   sudo systemctl restart fry-external-api nginx
+   sudo systemctl restart hardware_exe_api nginx
    ```
 
 ### Manual Deployment Options
@@ -77,25 +77,25 @@ python -m uvicorn app:app --reload --host 127.0.0.1 --port 8080
 #### Option 1: Using systemd (Recommended)
 ```bash
 # Start/stop/restart the service
-sudo systemctl start fry-external-api
-sudo systemctl stop fry-external-api
-sudo systemctl restart fry-external-api
+sudo systemctl start hardware_exe_api
+sudo systemctl stop hardware_exe_api
+sudo systemctl restart hardware_exe_api
 
 # View logs
-sudo journalctl -u fry-external-api -f
+sudo journalctl -u hardware_exe_api -f
 ```
 
 #### Option 2: Using PM2
 ```bash
-cd /opt/fry-external-api
+cd /opt/hardware_exe_api
 pm2 start deployment/ecosystem.config.js
 pm2 save
 pm2 startup  # Follow instructions to auto-start on boot
 
 # PM2 commands
 pm2 status
-pm2 logs fry-external-api
-pm2 restart fry-external-api
+pm2 logs hardware_exe_api
+pm2 restart hardware_exe_api
 ```
 
 ### SSL Setup (Recommended)
@@ -215,8 +215,8 @@ On startup the app will try to resolve any `op/...` or `op://...` values using t
 ## Monitoring and Maintenance
 
 ### Log Files
-- **systemd logs:** `sudo journalctl -u fry-external-api -f`
-- **PM2 logs:** `pm2 logs fry-external-api`
+- **systemd logs:** `sudo journalctl -u hardware_exe_api -f`
+- **PM2 logs:** `pm2 logs hardware_exe_api`
 - **Nginx logs:** `sudo tail -f /var/log/nginx/access.log /var/log/nginx/error.log`
 
 ### Health Checks
@@ -229,9 +229,9 @@ The API automatically exposes all endpoints for health monitoring. You can set u
 ### Updates and Maintenance
 ```bash
 # Update application code
-cd /opt/fry-external-api
+cd /opt/hardware_exe_api
 git pull origin main  # if using git
-sudo systemctl restart fry-external-api
+sudo systemctl restart hardware_exe_api
 
 # Update system packages
 sudo apt update && sudo apt upgrade -y

@@ -6,7 +6,7 @@
 set -e
 
 # Configuration
-APP_NAME="fry-external-api"
+APP_NAME="hardware_exe_api"
 APP_DIR="/opt/$APP_NAME"
 SERVICE_USER="www-data"
 LOG_DIR="/var/log/$APP_NAME"
@@ -43,9 +43,9 @@ sudo mkdir -p $LOG_DIR
 sudo chown -R $SERVICE_USER:$SERVICE_USER $APP_DIR
 sudo chown -R $SERVICE_USER:$SERVICE_USER $LOG_DIR
 
-# Copy application files (assumes you've uploaded them to /tmp/fry-external-api)
+# Copy application files (assumes you've uploaded them to /tmp/hardware_exe_api)
 echo "📋 Copying application files..."
-sudo cp -r /tmp/fry-external-api/* $APP_DIR/
+sudo cp -r /tmp/hardware_exe_api/* $APP_DIR/
 sudo chown -R $SERVICE_USER:$SERVICE_USER $APP_DIR
 
 # Set up Python virtual environment
@@ -73,7 +73,7 @@ EOF
 
 # Set up systemd service
 echo "🔧 Setting up systemd service..."
-sudo cp $APP_DIR/deployment/fry-external-api.service /etc/systemd/system/
+sudo cp $APP_DIR/deployment/hardware_exe_api.service /etc/systemd/system/hardware_exe_api.service
 sudo systemctl daemon-reload
 sudo systemctl enable $APP_NAME
 
@@ -85,7 +85,7 @@ server {
     server_name your-domain.com;  # Change this to your actual domain
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+    proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;

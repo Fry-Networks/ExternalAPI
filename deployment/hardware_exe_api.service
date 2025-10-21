@@ -1,3 +1,4 @@
+```plaintext
 [Unit]
 Description=Hardware EXE API Service
 After=network.target
@@ -20,3 +21,4 @@ SyslogIdentifier=hardware_exe_api
 
 [Install]
 WantedBy=multi-user.target
+```

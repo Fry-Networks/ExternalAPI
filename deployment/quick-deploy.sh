@@ -17,9 +17,10 @@ fi
 # Get the repository
 echo "📥 Downloading application..."
 cd /tmp
-rm -rf fry-external-api
-git clone https://github.com/Fry-Foundation/ExternalAPI.git fry-external-api
-cd fry-external-api
+rm -rf hardware_exe_api
+rm -rf hardware_exe_api
+git clone https://github.com/Fry-Foundation/ExternalAPI.git hardware_exe_api
+cd hardware_exe_api
 
 # Make deploy script executable and run it
 chmod +x deployment/deploy.sh
@@ -29,7 +30,7 @@ echo ""
 echo "🎉 Quick deployment completed!"
 echo ""
 echo "🔧 Don't forget to:"
-echo "1. Configure your domain in /etc/nginx/sites-available/fry-external-api"
-echo "2. Edit /opt/fry-external-api/.env with your settings"
+echo "1. Configure your domain in /etc/nginx/sites-available/hardware_exe_api"
+echo "2. Edit /opt/hardware_exe_api/.env with your settings"
 echo "3. Set up SSL: sudo certbot --nginx -d your-domain.com"
-echo "4. Restart services: sudo systemctl restart fry-external-api nginx"
+echo "4. Restart services: sudo systemctl restart hardware_exe_api nginx"
