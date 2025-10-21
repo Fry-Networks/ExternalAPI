@@ -21,14 +21,51 @@ sudo apt update && sudo apt upgrade -y
 echo "🔧 Installing system dependencies..."
 sudo apt install -y python3 python3-pip python3-venv nginx git curl
 
-# Install MongoDB (if not already installed)
-echo "🍃 Installing MongoDB..."
-wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | sudo apt-key add -
-echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-sudo apt update
-sudo apt install -y mongodb-org
-sudo systemctl start mongod
-sudo systemctl enable mongod
+# Install MongoDB (if not already installed). Some newer Ubuntu codenames
+# (e.g. 'noble') do not yet have official mongodb-org repo packages. You can
+# skip automatic installation by setting SKIP_MONGODB_INSTALL=1 when running
+# this script. The script will attempt the official upstream repo for known
+# supported codenames and otherwise fall back to the distro package (may be
+# an older MongoDB version) or skip if that fails.
+if [ "${SKIP_MONGODB_INSTALL:-0}" != "1" ]; then
+    echo "🍃 Installing MongoDB..."
+    CODENAME=$(lsb_release -cs)
+    case "$CODENAME" in
+        jammy|focal|buster|bullseye)
+            echo "Detected supported codename '$CODENAME' — attempting official MongoDB repo..."
+            wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | sudo tee /usr/share/keyrings/mongodb-org-7.gpg >/dev/null
+            echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-org-7.gpg ] https://repo.mongodb.org/apt/ubuntu $CODENAME/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+            sudo apt update || true
+            if sudo apt install -y mongodb-org; then
+                sudo systemctl start mongod
+                sudo systemctl enable mongod
+            else
+                echo "⚠️  Failed to install mongodb-org from upstream repo; falling back to distro package..."
+                sudo apt update
+                if sudo apt install -y mongodb; then
+                    echo "Installed distro 'mongodb' package"
+                    sudo systemctl start mongodb || sudo systemctl start mongod || true
+                    sudo systemctl enable mongodb || true
+                else
+                    echo "⚠️  Failed to install MongoDB from distro packages. Skipping MongoDB installation. You must provide an external MongoDB and set MONGODB_URI in .env"
+                fi
+            fi
+            ;;
+        *)
+            echo "⚠️  Ubuntu codename '$CODENAME' not supported by mongodb-org upstream repo in this script."
+            echo "    Attempting to install distro 'mongodb' package as a fallback (may be an older version)."
+            sudo apt update
+            if sudo apt install -y mongodb; then
+                sudo systemctl start mongodb || sudo systemctl start mongod || true
+                sudo systemctl enable mongodb || true
+            else
+                echo "⚠️  Failed to install MongoDB via distro packages. Skipping MongoDB installation. You must provide an external MongoDB and set MONGODB_URI in .env"
+            fi
+            ;;
+    esac
+else
+    echo "ℹ️  SKIP_MONGODB_INSTALL=1 set — skipping MongoDB installation. Make sure MONGODB_URI points to a running MongoDB instance."
+fi
 
 # Install PM2 globally (optional)
 echo "📱 Installing PM2..."
