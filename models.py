@@ -52,10 +52,6 @@ class LeaseResponse(BaseModel):
     ttl_seconds: Optional[int] = None
 
 
-class LeaseHistoryResponse(BaseModel):
-    leases: list[Dict[str, Any]]
-
-
 class HardwareDocument(BaseModel):
     document: Dict[str, Any]
 

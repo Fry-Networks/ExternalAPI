@@ -68,7 +68,6 @@ from models import (
     HardwareResponse,
     InstallationHeartbeat,
     LeaseAction,
-    LeaseHistoryResponse,
     LeaseResponse,
     MinerProfileResponse,
     VersionResponse,
@@ -77,7 +76,7 @@ from storage import STORE
 
 app = FastAPI(
     title="Miner External API",
-    version="0.1.0",
+    version="1.0.0",
     summary="Reference implementation of the FryNetworks miner HTTP contract.",
 )
 
@@ -95,14 +94,14 @@ def get_required_version(miner_code: str = Path(..., description="Miner family c
     return VersionResponse(required_version=version)
 
 
-@app.get("/miners/{miner_key}", response_model=MinerProfileResponse)
+@app.get("/credentials/{miner_key}", response_model=MinerProfileResponse)
 def get_miner_profile(miner_key: str = Path(..., description="Full miner key")) -> MinerProfileResponse:
     profile = STORE.get_miner_profile(miner_key)
     return MinerProfileResponse(**profile)
 
 
 @app.post(
-    "/miners/{miner_key}/installations/{install_id}",
+    "/installations/{miner_key}/installations/{install_id}",
     response_model=GenericOk,
     status_code=status.HTTP_202_ACCEPTED,
 )
@@ -120,7 +119,7 @@ def upsert_installation(
 
 
 @app.post(
-    "/miners/{miner_key}/leases/{install_id}",
+    "/installations/{miner_key}/leases/{install_id}",
     response_model=LeaseResponse,
 )
 def acquire_installation_lease(
@@ -156,7 +155,7 @@ def acquire_installation_lease(
 
 
 @app.patch(
-    "/miners/{miner_key}/leases/{install_id}",
+    "/installations/{miner_key}/leases/{install_id}",
     response_model=LeaseResponse,
 )
 def renew_installation_lease(
@@ -191,7 +190,7 @@ def renew_installation_lease(
 
 
 @app.get(
-    "/miners/{miner_key}/leases/current",
+    "/installations/{miner_key}/leases/current",
     response_model=LeaseResponse,
 )
 def lease_status(miner_key: str) -> LeaseResponse:
@@ -201,16 +200,7 @@ def lease_status(miner_key: str) -> LeaseResponse:
 
 
 @app.get(
-    "/miners/{miner_key}/leases/history",
-    response_model=LeaseHistoryResponse,
-)
-def lease_history(miner_key: str) -> LeaseHistoryResponse:
-    history = STORE.lease_history(miner_key)
-    return LeaseHistoryResponse(leases=history)
-
-
-@app.get(
-    "/miners/{miner_key}/hardware",
+    "/PoC/{miner_key}/hardware",
     response_model=HardwareResponse,
 )
 def get_hardware_doc(miner_key: str) -> HardwareResponse:
@@ -221,7 +211,7 @@ def get_hardware_doc(miner_key: str) -> HardwareResponse:
 
 
 @app.put(
-    "/miners/{miner_key}/hardware",
+    "/PoC/{miner_key}/hardware",
     response_model=GenericOk,
     status_code=status.HTTP_202_ACCEPTED,
 )

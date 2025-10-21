@@ -12,14 +12,10 @@ try:
     from pymongo.collection import Collection
 except Exception:  # pragma: no cover - optional dependency
     MongoClient = None  # type: ignore
-    # Provide a lightweight polyfill so code referencing ReturnDocument.AFTER
-    # doesn't crash when pymongo isn't installed. The polyfill value is
-    # intentionally a sentinel; when using real pymongo the proper enum is used.
     class _RD:  # pragma: no cover - executed when pymongo missing
         AFTER = True
 
     ReturnDocument = _RD  # type: ignore
-
 
 @dataclass
 class InstallationRecord:
@@ -27,7 +23,6 @@ class InstallationRecord:
     install_id: str
     payload: Dict[str, Any] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
 
 @dataclass
 class LeaseRecord:
@@ -50,7 +45,6 @@ class InMemoryStore:
         self._miner_profiles: Dict[str, Dict[str, Any]] = {}
         self._installations: Dict[Tuple[str, str], InstallationRecord] = {}
         self._leases: Dict[str, LeaseRecord] = {}
-        self._lease_history: Dict[str, List[Dict[str, Any]]] = {}
         self._hardware_docs: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -64,7 +58,7 @@ class InMemoryStore:
             self._versions[miner_code.upper()] = version
 
     # ------------------------------------------------------------------
-    # Miner profiles
+    # Miner credentials
     def get_miner_profile(self, miner_key: str) -> Dict[str, Any]:
         with self._lock:
             return dict(self._miner_profiles.get(miner_key, {"exists": False}))
@@ -99,14 +93,6 @@ class InMemoryStore:
                 last_seen_at=now,
             )
             self._leases[miner_key] = record
-            self._append_history(miner_key, {
-                "miner_key": miner_key,
-                "install_id": install_id,
-                "lease_install_id": install_id,
-                "lease_expires_at": expiry.isoformat(),
-                "last_seen_at": now.isoformat(),
-                "granted": True,
-            })
             return True, record
 
     def renew_lease(self, miner_key: str, install_id: str, lease_seconds: int) -> Tuple[bool, Optional[LeaseRecord]]:
@@ -117,15 +103,6 @@ class InMemoryStore:
                 return False, current
             current.expires_at = now + timedelta(seconds=max(lease_seconds, 1))
             current.last_seen_at = now
-            self._append_history(miner_key, {
-                "miner_key": miner_key,
-                "install_id": install_id,
-                "lease_install_id": install_id,
-                "lease_expires_at": current.expires_at.isoformat(),
-                "last_seen_at": now.isoformat(),
-                "granted": True,
-                "renewal": True,
-            })
             return True, current
 
     def lease_status(self, miner_key: str) -> Dict[str, Any]:
@@ -139,15 +116,6 @@ class InMemoryStore:
                 "expires_at": record.expires_at.isoformat(),
                 "ttl_seconds": record.ttl_seconds(),
             }
-
-    def lease_history(self, miner_key: str) -> List[Dict[str, Any]]:
-        with self._lock:
-            return list(self._lease_history.get(miner_key, []))
-
-    def _append_history(self, miner_key: str, payload: Dict[str, Any]) -> None:
-        history = self._lease_history.setdefault(miner_key, [])
-        history.insert(0, payload)
-        del history[100:]
 
     # ------------------------------------------------------------------
     # Hardware aggregates
@@ -163,107 +131,35 @@ class InMemoryStore:
 class MongoStore:
     """MongoDB-backed store. Uses environment variables:
     - MONGODB_URI (mongodb connection string)
-    - MONGODB_DB (database name)
-
-    Requires both environment variables and pymongo to be installed.
+    
+    Uses fixed database names: 'PoC' for installations/hardware, 'creds' for credentials.
+    Requires MONGODB_URI environment variable and pymongo to be installed.
     """
-
     def __init__(self) -> None:
         self._lock = RLock()
         uri = os.environ.get("MONGODB_URI")
-        dbname = os.environ.get("MONGODB_DB")
         
         if MongoClient is None:
             raise ImportError("pymongo is required for MongoStore. Install with: pip install pymongo")
         
         if not uri:
             raise ValueError("MONGODB_URI environment variable is required for MongoStore")
-        
-        if not dbname:
-            raise ValueError("MONGODB_DB environment variable is required for MongoStore")
             
         # No fallback - proceed with MongoDB initialization
 
         self._client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-        self._db = self._client[dbname]
 
-        # detect if there is a 'PoC' database (some deployments use PoC.<collection>)
-        poc_db = None
-        try:
-            if "PoC" in self._client.list_database_names():
-                poc_db = self._client.get_database("PoC")
-        except Exception:
-            poc_db = None
+        # Always use PoC database for versions, installations, and hardware
+        poc_db = self._client.get_database("PoC")
+        self._versions: Collection = poc_db.get_collection("versions")
+        self._installations: Collection = poc_db.get_collection("installations")
+        self._hardware_docs: Collection = poc_db.get_collection("hardware")
 
-        # collections: prefer PoC.* collections for versions/installations/hardware if available
-        if poc_db is not None:
-            self._versions: Collection = poc_db.get_collection("versions")
-            self._installations: Collection = poc_db.get_collection("installations")
-            # PoC uses 'hardware' as collection name for hardware aggregates
-            self._hardware_docs: Collection = poc_db.get_collection("hardware")
-            self._lease_history: Collection = poc_db.get_collection("lease_history")
-        else:
-            self._versions: Collection = self._db.get_collection("versions")
-            self._installations: Collection = self._db.get_collection("installations")
-            self._hardware_docs: Collection = self._db.get_collection("hardware_docs")
-            self._lease_history: Collection = self._db.get_collection("lease_history")
+        # Always use creds database for miner profiles/credentials
+        creds_db = self._client.get_database("creds")
+        self._miner_profiles: Collection = creds_db.get_collection("hardware")
 
-        # miner_profiles may live in the configured DB
-        self._miner_profiles: Collection = self._db.get_collection("miner_profiles")
 
-        # Collect any creds.hardware collections we can find (configured DB and PoC DB)
-        self._creds_collections: List[Collection] = []
-        # Optionally allow an explicit creds DB name via env var
-        creds_dbname = os.environ.get("MONGODB_CREDS_DB")
-        creds_db = None
-        if creds_dbname:
-            try:
-                if creds_dbname in self._client.list_database_names():
-                    creds_db = self._client.get_database(creds_dbname)
-            except Exception:
-                creds_db = None
-        # If explicit creds DB provided, prefer its 'hardware' collection
-        if creds_db is not None:
-            try:
-                if "hardware" in creds_db.list_collection_names():
-                    self._creds_collections.append(creds_db.get_collection("hardware"))
-            except Exception:
-                pass
-        # configured DB may itself contain a 'hardware' collection
-        try:
-            if "hardware" in self._db.list_collection_names():
-                self._creds_collections.append(self._db.get_collection("hardware"))
-        except Exception:
-            pass
-
-        # Check top-level 'creds' database (common layout: creds.hardware)
-        try:
-            if "creds" in self._client.list_database_names():
-                creds_db = self._client.get_database("creds")
-                try:
-                    if "hardware" in creds_db.list_collection_names():
-                        self._creds_collections.append(creds_db.get_collection("hardware"))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Also, if PoC DB has a hardware collection, include it as a potential source
-        try:
-            if poc_db is not None:
-                if "hardware" in poc_db.list_collection_names():
-                    self._creds_collections.append(poc_db.get_collection("hardware"))
-        except Exception:
-            pass
-
-        # ensure TTL index for leases.expires_at if we have a leases collection (best effort)
-        try:
-            # some deployments may not have a dedicated leases collection; create_index will no-op if not applicable
-            if getattr(self, "_lease_history", None) is not None:
-                # lease expiry is stored on installation docs in PoC; we won't create TTL here but keep hook for future
-                pass
-        except Exception:
-            pass
 
     # No fallback mechanism - MongoDB is required
 
@@ -275,30 +171,10 @@ class MongoStore:
     def set_required_version(self, miner_code: str, version: str) -> None:
         self._versions.update_one({"miner_code": miner_code}, {"$set": {"software_version_needed": version, "miner_code": miner_code}}, upsert=True)
 
-    # Miner profiles
+    # Miner profiles - always use creds.hardware collection
     def get_miner_profile(self, miner_key: str) -> Dict[str, Any]:
-        # We'll try multiple collections and common field name variants to be permissive
-        # Priority lookup order (stop at first match):
-        # 1) creds.hardware collections (explicit creds DB, configured DB hardware, PoC.hardware)
         try:
-            for ch in getattr(self, "_creds_collections", []):
-                try:
-                    doc = ch.find_one({"miner_key": miner_key}) or ch.find_one({"minerKey": miner_key})
-                    if doc:
-                        doc = dict(doc)
-                        doc.pop("_id", None)
-                        doc.setdefault("exists", True)
-                        return doc
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-        # 2) miner_profiles collection in configured DB
-        try:
-            doc = self._miner_profiles.find_one({"_id": miner_key})
-            if not doc:
-                doc = self._miner_profiles.find_one({"miner_key": miner_key})
+            doc = self._miner_profiles.find_one({"miner_key": miner_key}) or self._miner_profiles.find_one({"minerKey": miner_key})
             if doc:
                 doc = dict(doc)
                 doc.pop("_id", None)
@@ -307,43 +183,13 @@ class MongoStore:
         except Exception:
             pass
 
-        # 3) installation documents (PoC.installations or configured installations)
-        try:
-            inst = self._installations.find_one({"miner_key": miner_key}) or self._installations.find_one({"minerKey": miner_key})
-            if inst:
-                inst = dict(inst)
-                inst.pop("_id", None)
-                inst.setdefault("exists", True)
-                return inst
-        except Exception:
-            pass
-
-        # 4) hardware_docs (PoC.hardware or configured hardware_docs)
-        try:
-            hw2 = self._hardware_docs.find_one({"miner_key": miner_key}) or self._hardware_docs.find_one({"minerKey": miner_key})
-            if hw2:
-                hw2 = dict(hw2)
-                hw2.pop("_id", None)
-                hw2.setdefault("exists", True)
-                return hw2
-        except Exception:
-            pass
-
-        # Nothing found — print a small debug hint (development only)
-        try:
-            srcs = []
-            srcs.append(("miner_profiles_db", getattr(self._db, "name", None)))
-            srcs.append(("creds_collections", [getattr(c, "full_name", str(c)) for c in getattr(self, "_creds_collections", [])]))
-            print(f"[ExternalAPI] get_miner_profile: no document for {miner_key}; checked: {srcs}")
-        except Exception:
-            pass
-
         return {"exists": False}
 
     def set_miner_profile(self, miner_key: str, **fields: Any) -> None:
         payload = dict(fields)
         payload.setdefault("exists", True)
-        self._miner_profiles.update_one({"_id": miner_key}, {"$set": payload}, upsert=True)
+        payload["miner_key"] = miner_key
+        self._miner_profiles.update_one({"miner_key": miner_key}, {"$set": payload}, upsert=True)
 
     # Installations
     def upsert_installation(self, miner_key: str, install_id: str, payload: Dict[str, Any]) -> None:
@@ -371,12 +217,7 @@ class MongoStore:
         for k, v in payload_copy.items():
             if k not in ("miner_key", "install_id"):
                 update_doc["$set"][k] = v
-
-        # Ensure we don't accidentally update 'first_installed_at' path which is
-        # intended to be created only on insert. If the incoming payload contains
-        # 'first_installed_at' (or dotted subkeys) we remove them from $set so
-        # that MongoDB won't error with a path conflict when $setOnInsert also
-        # specifies the same field.
+        # Prevent overwriting first_installed_at
         if "first_installed_at" in update_doc["$set"]:
             del update_doc["$set"]["first_installed_at"]
         # Remove any keys that would update subpaths of first_installed_at
@@ -430,22 +271,6 @@ class MongoStore:
             
             if updated:
                 print(f"[MongoStore] acquire_lease: atomic grant succeeded for {miner_key}/{install_id}")
-                # Push history (best-effort)
-                history_payload = {
-                    "miner_key": miner_key,
-                    "install_id": install_id,
-                    "lease_install_id": install_id,
-                    "lease_expires_at": expiry.isoformat(),
-                    "last_seen_at": now.isoformat(),
-                    "granted": True,
-                }
-                try:
-                    self._installations.update_one(
-                        {"miner_key": miner_key, "install_id": install_id}, 
-                        {"$push": {"lease_history": history_payload}}
-                    )
-                except Exception:
-                    pass
                 
                 expires_val = updated.get("lease_expires_at")
                 last_seen = updated.get("last_seen_at", now)
@@ -508,22 +333,6 @@ class MongoStore:
             
             if updated:
                 print(f"[MongoStore] renew_lease: atomic renewal succeeded for {miner_key}/{install_id}")
-                history_payload = {
-                    "miner_key": miner_key,
-                    "install_id": install_id,
-                    "lease_install_id": install_id,
-                    "lease_expires_at": new_expiry.isoformat(),
-                    "last_seen_at": now.isoformat(),
-                    "granted": True,
-                    "renewal": True,
-                }
-                try:
-                    self._installations.update_one(
-                        {"miner_key": miner_key, "install_id": install_id}, 
-                        {"$push": {"lease_history": history_payload}}
-                    )
-                except Exception:
-                    pass
                 return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now)
             
             # Atomic renewal failed - not the current holder or doc missing
@@ -557,21 +366,6 @@ class MongoStore:
                 {"miner_key": miner_key, "install_id": install_id}, 
                 {"$set": {"lease_expires_at": new_expiry, "last_seen_at": now}}
             )
-            try:
-                self._installations.update_one(
-                    {"miner_key": miner_key, "install_id": install_id}, 
-                    {"$push": {"lease_history": {
-                        "miner_key": miner_key,
-                        "install_id": install_id,
-                        "lease_install_id": install_id,
-                        "lease_expires_at": new_expiry.isoformat(),
-                        "last_seen_at": now.isoformat(),
-                        "granted": True,
-                        "renewal": True,
-                    }}}
-                )
-            except Exception:
-                pass
             return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now)
 
     def lease_status(self, miner_key: str) -> Dict[str, Any]:
@@ -606,23 +400,6 @@ class MongoStore:
         expires_iso = expires_dt.isoformat() if isinstance(expires_dt, datetime) else None
         return {"active": True, "holder_install_id": rec.get("lease_install_id"), "expires_at": expires_iso, "ttl_seconds": ttl}
 
-    def lease_history(self, miner_key: str) -> List[Dict[str, Any]]:
-        # Aggregate lease_history arrays from installation documents for this miner
-        results: List[Dict[str, Any]] = []
-        try:
-            cursor = self._installations.find({"miner_key": miner_key})
-            for inst in cursor:
-                lh = inst.get("lease_history") or []
-                for entry in lh:
-                    results.append(entry)
-        except Exception:
-            return []
-        # sort entries by last_seen_at or lease_expires_at descending
-        def _key(e: Dict[str, Any]) -> str:
-            return e.get("last_seen_at") or e.get("lease_expires_at") or ""
-        results.sort(key=_key, reverse=True)
-        return results[:100]
-
     # Hardware aggregates
     def get_hardware_doc(self, miner_key: str) -> Dict[str, Any]:
         # Read from PoC.hardware (runtime data with mac, software, PoC, PoL fields).
@@ -646,7 +423,7 @@ class MongoStore:
 
 # MongoDB store is required - no fallback
 def _create_store() -> MongoStore:
-    print("[ExternalAPI] Initializing MongoStore (MONGODB_URI and MONGODB_DB required)")
+    print("[ExternalAPI] Initializing MongoStore (MONGODB_URI required)")
     store = MongoStore()
     
     # Test MongoDB connectivity

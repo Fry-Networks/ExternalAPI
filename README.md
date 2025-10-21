@@ -1,6 +1,6 @@
 # External API Service
 
-Lightweight FastAPI service that provides the HTTP contract consumed by the miner binaries. It stores all state in memory (or on-disk snapshots if you extend `storage.py`).
+Lightweight FastAPI service that provides the HTTP contract consumed by the miner binaries. Uses MongoDB for persistent storage with optimized database structure for scalability and performance.
 
 ## Project Structure
 
@@ -119,9 +119,8 @@ PORT=8080
 HOST=0.0.0.0
 UVICORN_RELOAD=false
 
-# MongoDB configuration (REQUIRED - application will fail to start without these)
+# MongoDB configuration (REQUIRED - application will fail to start without this)
 MONGODB_URI=mongodb://localhost:27017
-MONGODB_DB=fry_external_api
 
 # 1Password secrets (if using 1Password CLI)
 # MONGODB_URI=op://vault/item/field
@@ -136,7 +135,6 @@ PORT=8080
 HOST=127.0.0.1
 UVICORN_RELOAD=true
 MONGODB_URI=mongodb://localhost:27017
-MONGODB_DB=fry_external_api_dev
 ```
 
 Start the development server:
@@ -149,19 +147,57 @@ python -m uvicorn app:app --reload --host 127.0.0.1 --port 8080
 
 The miner should be configured with `api_base_url` pointing at your production URL (e.g., `https://your-domain.com` or `http://your-vps-ip:8080`).
 
-## Endpoints
+## API Endpoints
 
+### Version Management
 | Method | Path | Description |
 | ------ | ---- | ----------- |
 | GET | `/versions/{miner_code}` | Returns the latest required version for a miner family. |
-| GET | `/miners/{miner_key}` | Retrieves registration metadata for a miner key (registered MAC/hex ID). |
-| POST | `/miners/{miner_key}/installations/{install_id}` | Upserts per-installation heartbeat information. |
-| POST | `/miners/{miner_key}/leases/{install_id}` | Attempts to acquire a global lease. |
-| PATCH | `/miners/{miner_key}/leases/{install_id}` | Renews an existing lease. |
-| GET | `/miners/{miner_key}/leases/current` | Returns the active lease (if any) including remaining TTL. |
-| GET | `/miners/{miner_key}/leases/history` | Returns historical lease entries. |
-| GET | `/miners/{miner_key}/hardware` | Returns the latest hardware aggregate document. |
-| PUT | `/miners/{miner_key}/hardware` | Replaces the hardware aggregate document. |
+
+### Credential Management
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET | `/credentials/{miner_key}` | Retrieves miner credentials and profile data from creds database. |
+
+### Installation Management
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| POST | `/installations/{miner_key}/installations/{install_id}` | Upserts per-installation heartbeat information. |
+
+### Lease Management
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| POST | `/installations/{miner_key}/leases/{install_id}` | Attempts to acquire a global mining lease. |
+| PATCH | `/installations/{miner_key}/leases/{install_id}` | Renews an existing lease. |
+| GET | `/installations/{miner_key}/leases/current` | Returns the active lease (if any) including remaining TTL. |
+
+### Hardware/PoC Management
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET | `/PoC/{miner_key}/hardware` | Returns the latest hardware aggregate document from PoC database. |
+| PUT | `/PoC/{miner_key}/hardware` | Replaces the hardware aggregate document in PoC database. |
+
+### Database Structure
+The API uses a simplified MongoDB structure:
+- **PoC Database**: Stores versions, installations, and hardware data
+- **creds Database**: Stores miner credentials and profile information
+
+**Note**: Lease history functionality has been removed to prevent document bloat. Current lease status and expiration times provide sufficient tracking information.
+
+## Recent Optimizations
+
+### Database Structure Improvements
+- **Simplified Configuration**: Removed `MONGODB_DB` requirement - now uses fixed database names
+- **Performance**: Eliminated lease history tracking to prevent document bloat in installations collection
+- **Clarity**: Direct database targeting - PoC for operational data, creds for credentials
+
+### API Structure Improvements
+- **Organized Endpoints**: Restructured URLs to clearly separate concerns:
+  - `/credentials/*` - Credential and profile management
+  - `/installations/*` - Installation tracking and lease management  
+  - `/PoC/*` - Hardware and Proof-of-Coverage data
+- **Removed Endpoints**: Eliminated unused lease history endpoint
+- **Cleaner Codebase**: ~30% code reduction through cleanup and simplification
 
 ## 1Password Secrets Integration
 
@@ -185,7 +221,8 @@ On startup the app will try to resolve any `op/...` or `op://...` values using t
 
 ### Health Checks
 The API automatically exposes all endpoints for health monitoring. You can set up monitoring tools to check:
-- `GET /miners/{test_key}` - Basic API functionality
+- `GET /credentials/{test_key}` - Basic API functionality
+- `GET /installations/{test_key}/leases/current` - Lease system functionality
 - HTTP response times and status codes
 - System resource usage
 
