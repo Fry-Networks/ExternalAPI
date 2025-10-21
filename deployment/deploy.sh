@@ -10,6 +10,7 @@ APP_NAME="hardware_exe_api"
 APP_DIR="/opt/$APP_NAME"
 SERVICE_USER="www-data"
 LOG_DIR="/var/log/$APP_NAME"
+BRANCH="${BRANCH:-main}"
 
 echo "🚀 Starting deployment of $APP_NAME..."
 
@@ -80,9 +81,26 @@ sudo mkdir -p $LOG_DIR
 sudo chown -R $SERVICE_USER:$SERVICE_USER $APP_DIR
 sudo chown -R $SERVICE_USER:$SERVICE_USER $LOG_DIR
 
-# Copy application files (assumes you've uploaded them to /tmp/hardware_exe_api)
-echo "📋 Copying application files..."
-sudo cp -r /tmp/hardware_exe_api/* $APP_DIR/
+# Deploy application files. If the target directory is already a git repository,
+# perform a git pull to update it. Otherwise copy the uploaded files.
+echo "📋 Deploying application files..."
+if [ -d "$APP_DIR/.git" ]; then
+    echo "🔄 Detected existing git repo at $APP_DIR — attempting git pull (branch: $BRANCH)"
+    # Try to pull as root; if that fails, fall back to copying the uploaded tree
+        if git -C "$APP_DIR" pull origin "$BRANCH"; then
+        echo "✅ git pull successful"
+    else
+        echo "⚠️  git pull failed; falling back to copying uploaded files"
+        # copy all files including hidden files (.git, dotfiles)
+        sudo cp -a /tmp/hardware_exe_api/. $APP_DIR/
+    fi
+else
+    echo "� Fresh install — copying files to $APP_DIR"
+    # copy all files including hidden files (.git, dotfiles)
+    sudo cp -a /tmp/hardware_exe_api/. $APP_DIR/
+fi
+
+# Ensure correct ownership after deploy
 sudo chown -R $SERVICE_USER:$SERVICE_USER $APP_DIR
 
 # Set up Python virtual environment
@@ -92,9 +110,10 @@ sudo -u $SERVICE_USER python3 -m venv .venv
 sudo -u $SERVICE_USER .venv/bin/pip install --upgrade pip
 sudo -u $SERVICE_USER .venv/bin/pip install -r requirements.txt
 
-# Create .env file template
-echo "⚙️ Creating environment configuration..."
-sudo -u $SERVICE_USER tee $APP_DIR/.env > /dev/null <<EOF
+# Create .env file template if one does not already exist
+echo "⚙️ Ensuring environment configuration exists..."
+if [ ! -f "$APP_DIR/.env" ]; then
+    sudo -u $SERVICE_USER tee $APP_DIR/.env > /dev/null <<'EOF'
 # Production environment configuration
 PORT=8080
 HOST=0.0.0.0
@@ -107,6 +126,7 @@ MONGODB_DB=fry_external_api
 # 1Password secrets (if using 1Password CLI)
 # MONGODB_URI=op://vault/item/field
 EOF
+fi
 
 # Set up systemd service
 echo "🔧 Setting up systemd service..."
