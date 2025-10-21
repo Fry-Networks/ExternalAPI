@@ -61,6 +61,8 @@ for k, v in list(os.environ.items()):
         os.environ[k] = _fetch_op_secret(v)
 
 from fastapi import Body, FastAPI, HTTPException, Path, status
+from fastapi.responses import RedirectResponse
+from contextlib import asynccontextmanager
 
 from models import (
     GenericOk,
@@ -71,30 +73,147 @@ from models import (
     LeaseResponse,
     MinerProfileResponse,
     VersionResponse,
+    MinerCode,
 )
 from storage import STORE
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # On startup: augment generated OpenAPI schema with human-readable
+    # descriptions for MinerCode enum values and cache the modified schema.
+    try:
+        from models import MinerCode
+
+        enum_desc = {
+            "BM": "Bandwidth Miner",
+            "IDM": "Indoor Decibel Miner",
+            "ODM": "Outdoor Decibel Miner",
+            "ISM": "Indoor Satellite Miner",
+            "OSM": "Outdoor Satellite Miner",
+            "RDN": "Reward Decentralization Node",
+            "SDN": "Storage Decentralization Node",
+            "SVN": "Storage Validator Node",
+            "AEM": "AI Edge Miner",
+            "IRM": "Indoor Radiation Miner",
+        }
+
+        # Generate the OpenAPI schema once and attach descriptions
+        openapi_schema = app.openapi()
+        schemas = openapi_schema.get("components", {}).get("schemas", {})
+        for name, schema in schemas.items():
+            enum_vals = schema.get("enum", [])
+            if enum_vals and set(enum_vals) & set(enum_desc.keys()):
+                schema["x-enum-descriptions"] = [enum_desc.get(v, "") for v in enum_vals]
+
+        # Also attach enum descriptions to operation parameters so Swagger UI
+        # can show descriptions near the selected value in the parameter UI.
+        try:
+            paths = openapi_schema.get("paths", {})
+            for path, ops in paths.items():
+                for op, opobj in ops.items():
+                    # each operation can have a 'parameters' list
+                    params = opobj.get("parameters") or []
+                    for p in params:
+                        # Parameter may be inline schema or a $ref
+                        schema = p.get("schema") or {}
+                        # If schema is a $ref, resolve to the component schema
+                        ref = schema.get("$ref")
+                        target_schema = None
+                        if ref and ref.startswith("#/components/schemas/"):
+                            key = ref.split("/")[-1]
+                            target_schema = schemas.get(key)
+                        else:
+                            target_schema = schema
+
+                        if target_schema:
+                            enum_vals = target_schema.get("enum", [])
+                            if enum_vals and set(enum_vals) & set(enum_desc.keys()):
+                                # attach matching descriptions in the same order
+                                p["x-enum-descriptions"] = [enum_desc.get(v, "") for v in enum_vals]
+        except Exception:
+            # Non-fatal; keep going even if parameter-level augmentation fails
+            pass
+
+        def _cached_openapi():
+            return openapi_schema
+
+        app.openapi = _cached_openapi
+    except Exception:
+        # Non-fatal; continue startup even if we couldn't augment OpenAPI
+        pass
+    yield
+
 
 app = FastAPI(
     title="Miner External API",
     version="1.0.0",
     summary="Reference implementation of the FryNetworks miner HTTP contract.",
+    description=(
+        "This service exposes endpoints for: \n"
+        " - Version management (required miner software)\n"
+        " - Credential/profile lookup (from creds database)\n"
+        " - Installation heartbeats and lease coordination (PoC database)\n"
+        " - Hardware/PoC document storage\n\n"
+        "Endpoints are grouped by functional area in the UI. Request/response schemas"
+        " are documented using Pydantic models in `models.py`."
+    ),
+    lifespan=lifespan,
 )
+
+
+# Redirect root to the interactive docs to provide a friendly public entrypoint.
+@app.get("/", include_in_schema=False)
+def _root_redirect():
+    return RedirectResponse(url="/docs")
+
+# Inject human-readable enum descriptions for MinerCode into the OpenAPI schema.
+# This uses a vendor extension `x-enum-descriptions` which Swagger UI will render
+# in the schema details. We also set an example for endpoints that reference
+# MinerCode via the model-level examples already present in `models.py`.
+# (OpenAPI augmentation moved into lifespan handler above.)
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+@app.get("/health", tags=["Health"], summary="Health check")
+def health() -> Dict[str, Any]:
+    """Simple health endpoint used by probes and external tunnels.
 
-@app.get("/versions/{miner_code}", response_model=VersionResponse)
-def get_required_version(miner_code: str = Path(..., description="Miner family code", min_length=2)) -> VersionResponse:
-    version = STORE.get_required_version(miner_code)
+    Returns a small JSON payload with readiness and runtime information.
+    """
+    return {
+        "ok": True,
+        "pid": os.getpid(),
+        "port": int(os.getenv("PORT", "8081")),
+        "time": utc_now().isoformat(),
+    }
+
+
+
+@app.get(
+    "/versions/{miner_code}",
+    response_model=VersionResponse,
+    summary="Get required miner version",
+    tags=["Versions"],
+)
+def get_required_version(
+    miner_code: MinerCode = Path(...),
+) -> VersionResponse:
+    # MinerCode is an enum; use its value (e.g. 'AEM') when querying the store
+    version = STORE.get_required_version(miner_code.value)
     if version is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner code not found")
     return VersionResponse(required_version=version)
 
 
-@app.get("/credentials/{miner_key}", response_model=MinerProfileResponse)
+@app.get(
+    "/credentials/{miner_key}",
+    response_model=MinerProfileResponse,
+    summary="Get miner credentials/profile",
+    tags=["Credentials"],
+)
 def get_miner_profile(miner_key: str = Path(..., description="Full miner key")) -> MinerProfileResponse:
     profile = STORE.get_miner_profile(miner_key)
     return MinerProfileResponse(**profile)
@@ -104,6 +223,8 @@ def get_miner_profile(miner_key: str = Path(..., description="Full miner key")) 
     "/installations/{miner_key}/installations/{install_id}",
     response_model=GenericOk,
     status_code=status.HTTP_202_ACCEPTED,
+    summary="Upsert installation heartbeat",
+    tags=["Installations"],
 )
 def upsert_installation(
     miner_key: str,
@@ -121,6 +242,8 @@ def upsert_installation(
 @app.post(
     "/installations/{miner_key}/leases/{install_id}",
     response_model=LeaseResponse,
+    summary="Acquire a mining lease",
+    tags=["Leases"],
 )
 def acquire_installation_lease(
     miner_key: str,
@@ -157,6 +280,8 @@ def acquire_installation_lease(
 @app.patch(
     "/installations/{miner_key}/leases/{install_id}",
     response_model=LeaseResponse,
+    summary="Renew a mining lease",
+    tags=["Leases"],
 )
 def renew_installation_lease(
     miner_key: str,
@@ -192,6 +317,8 @@ def renew_installation_lease(
 @app.get(
     "/installations/{miner_key}/leases/current",
     response_model=LeaseResponse,
+    summary="Get current lease status",
+    tags=["Leases"],
 )
 def lease_status(miner_key: str) -> LeaseResponse:
     status_payload = STORE.lease_status(miner_key)
@@ -202,6 +329,8 @@ def lease_status(miner_key: str) -> LeaseResponse:
 @app.get(
     "/PoC/{miner_key}/hardware",
     response_model=HardwareResponse,
+    summary="Get PoC hardware document",
+    tags=["PoC"],
 )
 def get_hardware_doc(miner_key: str) -> HardwareResponse:
     doc = STORE.get_hardware_doc(miner_key)
@@ -214,6 +343,8 @@ def get_hardware_doc(miner_key: str) -> HardwareResponse:
     "/PoC/{miner_key}/hardware",
     response_model=GenericOk,
     status_code=status.HTTP_202_ACCEPTED,
+    summary="Replace PoC hardware document",
+    tags=["PoC"],
 )
 def put_hardware_doc(miner_key: str, payload: HardwareDocument) -> GenericOk:
     document = dict(payload.document)
