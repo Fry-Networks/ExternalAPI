@@ -119,9 +119,9 @@ PORT=8080
 HOST=0.0.0.0
 UVICORN_RELOAD=false
 
-# MongoDB configuration (if using MongoDB backend)
-# MONGODB_URI=mongodb://localhost:27017
-# MONGODB_DB=fry_external_api
+# MongoDB configuration (REQUIRED - application will fail to start without these)
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DB=fry_external_api
 
 # 1Password secrets (if using 1Password CLI)
 # MONGODB_URI=op://vault/item/field

@@ -21,6 +21,15 @@ sudo apt update && sudo apt upgrade -y
 echo "🔧 Installing system dependencies..."
 sudo apt install -y python3 python3-pip python3-venv nginx git curl
 
+# Install MongoDB (if not already installed)
+echo "🍃 Installing MongoDB..."
+wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | sudo apt-key add -
+echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+sudo apt update
+sudo apt install -y mongodb-org
+sudo systemctl start mongod
+sudo systemctl enable mongod
+
 # Install PM2 globally (optional)
 echo "📱 Installing PM2..."
 curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
@@ -54,9 +63,9 @@ PORT=8080
 HOST=0.0.0.0
 UVICORN_RELOAD=false
 
-# MongoDB configuration (if using MongoDB backend)
-# MONGODB_URI=mongodb://localhost:27017
-# MONGODB_DB=fry_external_api
+# MongoDB configuration (REQUIRED - application will fail without these)
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DB=fry_external_api
 
 # 1Password secrets (if using 1Password CLI)
 # MONGODB_URI=op://vault/item/field

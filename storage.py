@@ -165,18 +165,24 @@ class MongoStore:
     - MONGODB_URI (mongodb connection string)
     - MONGODB_DB (database name)
 
-    If pymongo is not installed or env vars are missing, fall back to InMemoryStore.
+    Requires both environment variables and pymongo to be installed.
     """
 
     def __init__(self) -> None:
         self._lock = RLock()
         uri = os.environ.get("MONGODB_URI")
         dbname = os.environ.get("MONGODB_DB")
-        if not uri or not dbname or MongoClient is None:
-            # fallback
-            self._impl = InMemoryStore()
-            self._client = None
-            return
+        
+        if MongoClient is None:
+            raise ImportError("pymongo is required for MongoStore. Install with: pip install pymongo")
+        
+        if not uri:
+            raise ValueError("MONGODB_URI environment variable is required for MongoStore")
+        
+        if not dbname:
+            raise ValueError("MONGODB_DB environment variable is required for MongoStore")
+            
+        # No fallback - proceed with MongoDB initialization
 
         self._client = MongoClient(uri, serverSelectionTimeoutMS=5000)
         self._db = self._client[dbname]
@@ -259,26 +265,18 @@ class MongoStore:
         except Exception:
             pass
 
-    # Helper to detect fallback
-    def _fallback(self) -> bool:
-        return getattr(self, "_impl", None) is not None
+    # No fallback mechanism - MongoDB is required
 
     # Version metadata
     def get_required_version(self, miner_code: str) -> Optional[str]:
-        if self._fallback():
-            return self._impl.get_required_version(miner_code)
         doc = self._versions.find_one({"miner_code": miner_code})
         return doc.get("software_version_needed") if doc else None
 
     def set_required_version(self, miner_code: str, version: str) -> None:
-        if self._fallback():
-            return self._impl.set_required_version(miner_code, version)
         self._versions.update_one({"miner_code": miner_code}, {"$set": {"software_version_needed": version, "miner_code": miner_code}}, upsert=True)
 
     # Miner profiles
     def get_miner_profile(self, miner_key: str) -> Dict[str, Any]:
-        if self._fallback():
-            return self._impl.get_miner_profile(miner_key)
         # We'll try multiple collections and common field name variants to be permissive
         # Priority lookup order (stop at first match):
         # 1) creds.hardware collections (explicit creds DB, configured DB hardware, PoC.hardware)
@@ -343,16 +341,12 @@ class MongoStore:
         return {"exists": False}
 
     def set_miner_profile(self, miner_key: str, **fields: Any) -> None:
-        if self._fallback():
-            return self._impl.set_miner_profile(miner_key, **fields)
         payload = dict(fields)
         payload.setdefault("exists", True)
         self._miner_profiles.update_one({"_id": miner_key}, {"$set": payload}, upsert=True)
 
     # Installations
     def upsert_installation(self, miner_key: str, install_id: str, payload: Dict[str, Any]) -> None:
-        if self._fallback():
-            return self._impl.upsert_installation(miner_key, install_id, payload)
         key = {"miner_key": miner_key, "install_id": install_id}
         payload_copy = dict(payload)
         now = datetime.now(timezone.utc)
@@ -394,8 +388,6 @@ class MongoStore:
 
     # Leases
     def acquire_lease(self, miner_key: str, install_id: str, lease_seconds: int) -> Tuple[bool, LeaseRecord]:
-        if self._fallback():
-            return self._impl.acquire_lease(miner_key, install_id, lease_seconds)
         # Single atomic conditional find_one_and_update that grants a lease only when:
         # - no active lease exists (lease_expires_at missing or <= now)
         # - the document is for this install_id
@@ -497,8 +489,6 @@ class MongoStore:
             return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=expiry, last_seen_at=now)
 
     def renew_lease(self, miner_key: str, install_id: str, lease_seconds: int) -> Tuple[bool, Optional[LeaseRecord]]:
-        if self._fallback():
-            return self._impl.renew_lease(miner_key, install_id, lease_seconds)
         now = datetime.now(timezone.utc)
         new_expiry = now + timedelta(seconds=max(lease_seconds, 1))
         
@@ -585,8 +575,6 @@ class MongoStore:
             return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now)
 
     def lease_status(self, miner_key: str) -> Dict[str, Any]:
-        if self._fallback():
-            return self._impl.lease_status(miner_key)
         # find any installation doc for this miner with a lease that hasn't expired
         now = datetime.now(timezone.utc)
         rec = self._installations.find_one({"miner_key": miner_key, "lease_expires_at": {"$gt": now}})
@@ -619,8 +607,6 @@ class MongoStore:
         return {"active": True, "holder_install_id": rec.get("lease_install_id"), "expires_at": expires_iso, "ttl_seconds": ttl}
 
     def lease_history(self, miner_key: str) -> List[Dict[str, Any]]:
-        if self._fallback():
-            return self._impl.lease_history(miner_key)
         # Aggregate lease_history arrays from installation documents for this miner
         results: List[Dict[str, Any]] = []
         try:
@@ -639,8 +625,6 @@ class MongoStore:
 
     # Hardware aggregates
     def get_hardware_doc(self, miner_key: str) -> Dict[str, Any]:
-        if self._fallback():
-            return self._impl.get_hardware_doc(miner_key)
         # Read from PoC.hardware (runtime data with mac, software, PoC, PoL fields).
         # This is the collection that write_status updates via replace_one.
         doc = None
@@ -655,34 +639,25 @@ class MongoStore:
         return doc
 
     def put_hardware_doc(self, miner_key: str, document: Dict[str, Any]) -> None:
-        if self._fallback():
-            return self._impl.put_hardware_doc(miner_key, document)
         doc = dict(document)
         doc["miner_key"] = miner_key
         self._hardware_docs.update_one({"miner_key": miner_key}, {"$set": doc}, upsert=True)
 
 
-# Choose store implementation based on environment
-def _create_store() -> Any:
-    uri = os.environ.get("MONGODB_URI")
-    db = os.environ.get("MONGODB_DB")
-    if uri and db and MongoClient is not None:
-        try:
-            store = MongoStore()
-            try:
-                # quick server selection test - call server_info if client is present
-                client = getattr(store, "_client", None)
-                if client is not None:
-                    client.server_info()
-            except Exception as e:  # pragma: no cover - runtime connectivity
-                print(f"[ExternalAPI] Warning: MongoDB reachable? check MONGODB_URI - falling back to InMemoryStore. Error: {e}")
-                return InMemoryStore()
-            print("[ExternalAPI] Using MongoStore (MONGODB_URI present)")
-            return store
-        except Exception as e:  # pragma: no cover - optional dependency/runtime
-            print(f"[ExternalAPI] MongoStore initialization failed, falling back to InMemoryStore: {e}")
-    print("[ExternalAPI] Using InMemoryStore (no MONGODB_URI or pymongo missing)")
-    return InMemoryStore()
+# MongoDB store is required - no fallback
+def _create_store() -> MongoStore:
+    print("[ExternalAPI] Initializing MongoStore (MONGODB_URI and MONGODB_DB required)")
+    store = MongoStore()
+    
+    # Test MongoDB connectivity
+    try:
+        client = getattr(store, "_client", None)
+        if client is not None:
+            client.server_info()
+        print("[ExternalAPI] Using MongoStore - MongoDB connection successful")
+        return store
+    except Exception as e:
+        raise ConnectionError(f"MongoDB connection failed. Check MONGODB_URI and ensure MongoDB is running. Error: {e}")
 
 
 STORE = _create_store()
