@@ -66,7 +66,7 @@ python -m uvicorn app:app --reload --host 127.0.0.1 --port 8080
    sudo nano /opt/hardware_exe_api/.env
    
    # Update nginx server name
-   sudo nano /etc/nginx/sites-available/hardware_exe_api
+   sudo nano /etc/nginx/sites-available/hardwareapi
    
    # Restart services
    sudo systemctl restart hardware_exe_api nginx

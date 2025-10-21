@@ -145,12 +145,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Miner External API",
+    title="Hardware API",
     version="1.0.0",
-    summary="Reference implementation of the FryNetworks miner HTTP contract.",
+    summary="Reference implementation of the FryNetworks hardware miner HTTP contract.",
     description=(
         "This service exposes endpoints for: \n"
-        " - Version management (required miner software)\n"
+        " - Version management (required hardware miner software)\n"
         " - Credential/profile lookup (from creds database)\n"
         " - Installation heartbeats and lease coordination (PoC database)\n"
         " - Hardware/PoC document storage\n\n"
