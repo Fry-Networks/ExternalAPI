@@ -2,6 +2,25 @@
 
 Lightweight FastAPI service that provides the HTTP contract consumed by the miner binaries. It stores all state in memory (or on-disk snapshots if you extend `storage.py`).
 
+## Project Structure
+
+```
+ExternalAPI/
+├── app.py                     # Main FastAPI application
+├── models.py                  # Data models and schemas
+├── storage.py                 # Storage backend (in-memory/MongoDB)
+├── requirements.txt           # Python dependencies
+├── .env.production           # Production environment template
+├── README.md                 # This file
+└── deployment/               # Deployment files
+    ├── deploy.sh            # Automated VPS deployment script
+    ├── quick-deploy.sh      # One-liner deployment script
+    ├── ecosystem.config.js  # PM2 process manager configuration
+    ├── fry-external-api.service # Systemd service definition
+    ├── Dockerfile          # Docker container definition
+    └── docker-compose.yml  # Docker Compose configuration
+```
+
 ## Quick start (Development)
 
 ```powershell
@@ -37,8 +56,8 @@ python -m uvicorn app:app --reload --host 127.0.0.1 --port 8080
 2. **Run the deployment script:**
    ```bash
    cd /tmp/fry-external-api
-   chmod +x deploy.sh
-   sudo ./deploy.sh
+   chmod +x deployment/deploy.sh
+   sudo ./deployment/deploy.sh
    ```
 
 3. **Configure your environment:**
@@ -69,7 +88,7 @@ sudo journalctl -u fry-external-api -f
 #### Option 2: Using PM2
 ```bash
 cd /opt/fry-external-api
-pm2 start ecosystem.config.js
+pm2 start deployment/ecosystem.config.js
 pm2 save
 pm2 startup  # Follow instructions to auto-start on boot
 

@@ -64,7 +64,7 @@ EOF
 
 # Set up systemd service
 echo "🔧 Setting up systemd service..."
-sudo cp $APP_DIR/fry-external-api.service /etc/systemd/system/
+sudo cp $APP_DIR/deployment/fry-external-api.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable $APP_NAME
 
@@ -121,6 +121,6 @@ echo "  Stop service: sudo systemctl stop $APP_NAME"
 echo "  Check status: sudo systemctl status $APP_NAME"
 echo ""
 echo "📊 PM2 alternative commands:"
-echo "  Start with PM2: cd $APP_DIR && pm2 start ecosystem.config.js"
+echo "  Start with PM2: cd $APP_DIR && pm2 start deployment/ecosystem.config.js"
 echo "  View PM2 status: pm2 status"
 echo "  View PM2 logs: pm2 logs $APP_NAME"

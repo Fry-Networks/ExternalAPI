@@ -22,8 +22,8 @@ git clone https://github.com/Fry-Foundation/ExternalAPI.git fry-external-api
 cd fry-external-api
 
 # Make deploy script executable and run it
-chmod +x deploy.sh
-./deploy.sh
+chmod +x deployment/deploy.sh
+./deployment/deploy.sh
 
 echo ""
 echo "🎉 Quick deployment completed!"
