@@ -10,7 +10,13 @@ module.exports = {
     max_memory_restart: '512M',
     // Minimal defaults; canonical environment comes from /opt/hardware_exe_api/.env
     env: {},
-    env_production: {},
+    env_production: {
+      NODE_ENV: 'production',
+      PORT: 8081,
+      HOST: '127.0.0.1',
+      UVICORN_RELOAD: 'false',
+      MONGODB_URI: 'op/Mongo/Dude350zTest-Vercel/uri'
+  },
   error_file: '/var/log/hardware_exe_api/error.log',
   out_file: '/var/log/hardware_exe_api/out.log',
   log_file: '/var/log/hardware_exe_api/combined.log',
