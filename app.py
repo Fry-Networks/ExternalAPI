@@ -399,6 +399,23 @@ async def lifespan(app: FastAPI):
     except Exception:
         # Non-fatal; continue startup even if we couldn't augment OpenAPI
         pass
+
+    # Load persistent manual bans (if file exists). Expect a list of objects with keys: ip, reason, ts
+    try:
+        bans_file = PathLib("deployment/banned_ips.json")
+        if bans_file.exists():
+            import json
+            data = json.loads(bans_file.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict):
+                        ip = entry.get("ip")
+                        if ip:
+                            _persistent_bans[ip] = entry
+                            _probe_blocklist[ip] = float("inf")
+                            logging.getLogger("ExternalAPI.file").warning(f"LOADED_PERSISTENT_BAN ip={ip} reason={entry.get('reason')}")
+    except Exception:
+        logging.getLogger("ExternalAPI.file").debug("failed to load persistent bans")
     yield
 
 
@@ -463,13 +480,74 @@ import asyncio
 _probe_404_window = int(os.getenv("PROBE_404_WINDOW", "60"))
 _probe_404_threshold = int(os.getenv("PROBE_404_THRESHOLD", "20"))
 _probe_block_seconds = int(os.getenv("PROBE_BLOCK_SECONDS", "600"))
+_probe_404_consec_threshold = int(os.getenv("PROBE_404_CONSEC_THRESHOLD", "5"))
 
 # maps ip -> deque[timestamps_of_404s]
 _probe_404_counters: Dict[str, deque] = defaultdict(lambda: deque())
+# maps ip -> count of consecutive 404s
+_probe_404_consec: Dict[str, int] = defaultdict(int)
 # maps ip -> blocked_until_timestamp
 _probe_blocklist: Dict[str, float] = {}
 # lock for concurrency safety
 _probe_lock = asyncio.Lock()
+_persistent_bans: Dict[str, Dict[str, Any]] = {}
+
+
+def _atomic_write_json(path: PathLib, data: object) -> None:
+    """Write JSON to path atomically using a temp file + replace."""
+    import json
+    tmp = path.with_suffix(".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # atomic replace
+    os.replace(str(tmp), str(path))
+
+
+def _persist_add_ban(ip: str, reason: str = "") -> None:
+    """Add a persistent ban entry with metadata (idempotent).
+
+    Stored format: [{"ip": "1.2.3.4", "reason": "sensitive_probe", "ts": 169...}, ...]
+    """
+    try:
+        bans_file = PathLib("deployment/banned_ips.json")
+        import json, time
+        existing = []
+        if bans_file.exists():
+            existing = json.loads(bans_file.read_text(encoding="utf-8")) or []
+        # Build a map for idempotency
+        by_ip = {e.get("ip"): e for e in existing if isinstance(e, dict) and e.get("ip")}
+        if ip not in by_ip:
+            entry = {"ip": ip, "reason": reason, "ts": int(time.time())}
+            existing.append(entry)
+            _atomic_write_json(bans_file, existing)
+            _persistent_bans[ip] = entry
+            logging.getLogger("ExternalAPI.file").warning(f"ADDED_PERSISTENT_BAN ip={ip} reason={reason}")
+        else:
+            # update in-memory map if missing
+            _persistent_bans[ip] = by_ip[ip]
+    except Exception:
+        logging.getLogger("ExternalAPI.file").exception("failed to persist added ban for %s", ip)
+
+
+def _persist_remove_ban(ip: str) -> bool:
+    """Remove a persistent ban entry by IP if present. Returns True if removed."""
+    try:
+        bans_file = PathLib("deployment/banned_ips.json")
+        import json
+        if not bans_file.exists():
+            _persistent_bans.pop(ip, None)
+            return False
+        existing = json.loads(bans_file.read_text(encoding="utf-8")) or []
+        new_list = [e for e in existing if not (isinstance(e, dict) and e.get("ip") == ip)]
+        if len(new_list) != len(existing):
+            _atomic_write_json(bans_file, new_list)
+            _persistent_bans.pop(ip, None)
+            logging.getLogger("ExternalAPI.file").warning(f"REMOVED_PERSISTENT_BAN ip={ip}")
+            return True
+        return False
+    except Exception:
+        logging.getLogger("ExternalAPI.file").exception("failed to persist removed ban for %s", ip)
+        return False
 
 # Sensitive filenames that indicate probing for config files or secrets.
 # If repeated within a short window, we will immediately block the offender.
@@ -557,6 +635,11 @@ async def log_requests(request: Request, call_next):
         file_msg = file_msg_base.format(level_label)
         logging.getLogger("ExternalAPI.console").error(console_msg)
         logging.getLogger("ExternalAPI.file").error(file_msg)
+        # reset consecutive 404s on non-404 status
+        try:
+            _probe_404_consec[client_ip] = 0
+        except Exception:
+            pass
     elif status_code >= 400:
         level_label = 'API ACCESS ERROR'
         console_msg = console_msg_base.format(level_label)
@@ -579,6 +662,9 @@ async def log_requests(request: Request, call_next):
                     # Trim old timestamps outside the window
                     while dq and dq[0] < now_ts - _probe_404_window:
                         dq.popleft()
+                    # Increment consecutive 404 counter
+                    c = (_probe_404_consec.get(client_ip, 0) + 1)
+                    _probe_404_consec[client_ip] = c
                     # Check for sensitive path probes and handle immediate blocking
                     try:
                         for sensitive in _sensitive_paths:
@@ -590,26 +676,40 @@ async def log_requests(request: Request, call_next):
                                 while sc and sc[0] < now_ts - _sensitive_window:
                                     sc.popleft()
                                 if len(sc) >= _sensitive_threshold:
-                                    # immediate block
-                                    _probe_blocklist[client_ip] = now_ts + _probe_block_seconds
+                                    # immediate permanent block (persisted)
+                                    _probe_blocklist[client_ip] = float("inf")
+                                    _persist_add_ban(client_ip, reason="sensitive_probe")
                                     logging.getLogger("ExternalAPI.file").warning(f"FAILED_SENSITIVE_PROBE ip={client_ip} path={url_path} count={len(sc)}")
-                                    logging.getLogger("ExternalAPI.console").warning(f"{client_ip} - [WARNING] - IP blocked for {_probe_block_seconds}s due to sensitive probes")
+                                    logging.getLogger("ExternalAPI.console").warning(f"{client_ip} - [WARNING] - IP permanently blocked due to sensitive probes")
                                     sc.clear()
                                     dq.clear()
+                                    _probe_404_consec[client_ip] = 0
                                     break
                     except Exception:
                         logging.getLogger("ExternalAPI.file").debug("sensitive probe detection failed for %s", client_ip)
-                    if len(dq) >= _probe_404_threshold:
-                        # Block the IP for configured duration
-                        _probe_blocklist[client_ip] = now_ts + _probe_block_seconds
-                        # emit a fail2ban-friendly block marker as well (file-only)
-                        logging.getLogger("ExternalAPI.file").warning(f"FAILED_PROBE_BLOCK ip={client_ip} duration={_probe_block_seconds} reason=404s")
-                        # user-visible console message (UA not included)
-                        logging.getLogger("ExternalAPI.console").warning(f"{client_ip} - [WARNING] - IP blocked for {_probe_block_seconds}s due to {len(dq)} 404s in {_probe_404_window}s")
+                    # Check consecutive 404 threshold
+                    if c >= _probe_404_consec_threshold:
+                        _probe_blocklist[client_ip] = float("inf")
+                        _persist_add_ban(client_ip, reason="404_consecutive")
+                        logging.getLogger("ExternalAPI.file").warning(f"FAILED_PROBE_CONSEC_404 ip={client_ip} count={c}")
+                        logging.getLogger("ExternalAPI.console").warning(f"{client_ip} - [WARNING] - IP permanently blocked due to {c} consecutive 404s")
+                        _probe_404_consec[client_ip] = 0
                         dq.clear()
+                        _sensitive_counters[client_ip].clear()
+                    
+                    if len(dq) >= _probe_404_threshold:
+                        # Permanent block for repeated 404 probes (persisted)
+                        _probe_blocklist[client_ip] = float("inf")
+                        _persist_add_ban(client_ip, reason="404_threshold")
+                        # emit a fail2ban-friendly block marker as well (file-only)
+                        logging.getLogger("ExternalAPI.file").warning(f"FAILED_PROBE_BLOCK ip={client_ip} reason=404s count={len(dq)}")
+                        # user-visible console message (UA not included)
+                        logging.getLogger("ExternalAPI.console").warning(f"{client_ip} - [WARNING] - IP permanently blocked due to {len(dq)} 404s in {_probe_404_window}s")
+                        dq.clear()
+                        _probe_404_consec[client_ip] = 0
                 else:
                     # For other 4xx codes we might optionally clear counters or ignore
-                    pass
+                    _probe_404_consec[client_ip] = 0
         except Exception:
             # Non-fatal: don't let tracking break request handling
             logger.debug("probe tracking failed")
@@ -622,12 +722,22 @@ async def log_requests(request: Request, call_next):
         file_msg = file_msg_base.format(level_label) + redirect_suffix
         logging.getLogger("ExternalAPI.console").warning(console_msg)
         logging.getLogger("ExternalAPI.file").warning(file_msg)
+        # reset consecutive 404s on non-404 status
+        try:
+            _probe_404_consec[client_ip] = 0
+        except Exception:
+            pass
     else:
         level_label = 'INFO'
         console_msg = console_msg_base.format(level_label)
         file_msg = file_msg_base.format(level_label)
         logging.getLogger("ExternalAPI.console").info(console_msg)
         logging.getLogger("ExternalAPI.file").info(file_msg)
+        # reset consecutive 404s on non-404 status
+        try:
+            _probe_404_consec[client_ip] = 0
+        except Exception:
+            pass
     
     return response
 
@@ -659,9 +769,35 @@ def list_blocked_ips(token: str = Depends(verify_bearer_token_admin)) -> Dict[st
     Note: this blocklist is in-memory and will reset if the app restarts.
     """
     now_ts = datetime.now().timestamp()
-    # return only currently blocked IPs with remaining seconds
-    blocked = {ip: max(0, int(until - now_ts)) for ip, until in _probe_blocklist.items() if until > now_ts}
+    # return only currently blocked IPs. For permanent bans (infinity) report as permanent.
+    blocked: Dict[str, Any] = {}
+    for ip, until in _probe_blocklist.items():
+        try:
+            if until > now_ts:
+                # detect permanent bans represented by infinity
+                if isinstance(until, float) and until == float("inf"):
+                    blocked[ip] = {"permanent": True, "remaining": None}
+                else:
+                    remaining = max(0, int(until - now_ts))
+                    blocked[ip] = {"permanent": False, "remaining": remaining}
+        except Exception:
+            # Be defensive: if anything odd happens, include the raw value
+            blocked[ip] = {"permanent": False, "remaining": str(until)}
     return {"blocked": blocked}
+
+
+
+@app.get("/admin/blocks/persistent", tags=["Admin"], summary="List persistent bans")
+def list_persistent_bans(token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
+    try:
+        bans_file = PathLib("deployment/banned_ips.json")
+        if not bans_file.exists():
+            return {"banned": []}
+        import json
+        data = json.loads(bans_file.read_text(encoding="utf-8")) or []
+        return {"banned": data}
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to read persistent bans")
 
 
 @app.post("/admin/blocks/unblock", tags=["Admin"], summary="Unblock an IP")
@@ -676,6 +812,8 @@ def unblock_ip(payload: Dict[str, str], token: str = Depends(verify_bearer_token
     removed = False
     if ip in _probe_blocklist:
         del _probe_blocklist[ip]
+        # remove persistent ban as well (if present)
+        _persist_remove_ban(ip)
         removed = True
         try:
             logging.getLogger("ExternalAPI.file").warning(f"FAILED_PROBE_UNBLOCK ip={ip}")

@@ -18,6 +18,9 @@ mongo-data/
 logs/
 *.log
 
+# Local persistent ban list (app-managed)
+deployment/banned_ips.json
+
 # IDE/editor settings
 .idea/
 .vscode/
