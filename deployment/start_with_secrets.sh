@@ -27,19 +27,62 @@ else
 fi
 
 echo ""
-echo "Step 2: Resolving secrets from 1Password..."
+echo "Step 2: Loading .env and resolving any 1Password references..."
 
-# Get the MongoDB URI from 1Password with error handling
-if MONGODB_URI=$(op item get "Dude350zTest-Vercel" --vault Mongo --fields uri --reveal 2>/dev/null); then
-    echo "✅ MongoDB URI resolved successfully from 1Password"
+# Load .env if present (export all variables)
+if [ -f ".env" ]; then
+    echo "Parsing .env safely (no direct sourcing)"
+    # Read .env line-by-line, ignore comments/empty lines, and export KEY=VALUE
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Trim leading/trailing whitespace
+        line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        # Skip empty lines and comments
+        case "$line" in
+            "" | \#*) continue ;;
+        esac
+        # Ensure line contains '='
+        if ! echo "$line" | grep -q "=" ; then
+            continue
+        fi
+        key="$(echo "$line" | cut -d'=' -f1 | sed -e 's/[[:space:]]*$//')"
+        value="$(echo "$line" | cut -d'=' -f2- | sed -e 's/^[[:space:]]*//')"
+        # Strip surrounding single or double quotes
+        if [[ "$value" =~ ^\".*\"$ || "$value" =~ ^\'.*\'$ ]]; then
+            value="${value:1:$((${#value}-2))}"
+        fi
+        export "$key"="$value"
+    done < .env
+    echo "✅ Loaded .env (parsed safely)"
 else
-    echo "❌ Failed to retrieve MongoDB URI from 1Password"
-    echo "   Please ensure:"
-    echo "   1. You're signed in: eval \$(op signin --account frynetworks)"
-    echo "   2. The item 'Dude350zTest-Vercel' exists in the 'Mongo' vault"
-    echo "   3. You have access to the vault"
-    exit 1
+    echo "ℹ️ .env not found; continuing with environment and op lookups"
 fi
+
+# Helper function to resolve op:// or op/ references using `op read`
+resolve_op_var() {
+    local key="$1"
+    local val="${!key}"
+    if [ -z "$val" ]; then
+        echo "⚠️  $key is not set in environment or .env"
+        return 0
+    fi
+    if [[ "$val" == op://* || "$val" == op/* ]]; then
+        if resolved=$(op read "$val" 2>/dev/null); then
+            export "$key"="$resolved"
+            echo "✅ $key resolved from 1Password ($val)"
+        else
+            echo "❌ Failed to retrieve $key from 1Password ($val)"
+            echo "   Please ensure you're signed in and that the op path is correct"
+            exit 1
+        fi
+    else
+        echo "ℹ️ $key set from .env or environment"
+    fi
+}
+
+# Resolve the specific secrets the app uses (adjust list if you add more)
+resolve_op_var MONGODB_URI
+resolve_op_var API_BEARER_TOKEN
+resolve_op_var API_BEARER_TOKEN_FLXTIME
 
 echo ""
 echo "Step 3: Setting up environment..."
@@ -49,6 +92,8 @@ export PORT=8081
 export HOST=127.0.0.1
 export UVICORN_RELOAD=false
 export MONGODB_URI="$MONGODB_URI"
+export API_BEARER_TOKEN="$API_BEARER_TOKEN"
+export API_BEARER_TOKEN_FLXTIME="$API_BEARER_TOKEN_FLXTIME"
 
 echo "✅ Environment variables configured"
 echo "   - Port: $PORT"

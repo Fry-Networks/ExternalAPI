@@ -15,6 +15,7 @@ venv/
 
 # Runtime data and logs
 mongo-data/
+logs/
 *.log
 
 # IDE/editor settings

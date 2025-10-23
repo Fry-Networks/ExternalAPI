@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any, Dict, List, Optional, Tuple
 import os
+import logging
 
 try:
     from pymongo import MongoClient
@@ -423,7 +424,8 @@ class MongoStore:
 
 # MongoDB store is required - no fallback
 def _create_store() -> MongoStore:
-    print("[ExternalAPI] Initializing MongoStore (MONGODB_URI required)")
+    logger = logging.getLogger("ExternalAPI")
+    logger.info("Initializing MongoStore (MONGODB_URI required)")
     store = MongoStore()
     
     # Test MongoDB connectivity
@@ -431,7 +433,7 @@ def _create_store() -> MongoStore:
         client = getattr(store, "_client", None)
         if client is not None:
             client.server_info()
-        print("[ExternalAPI] Using MongoStore - MongoDB connection successful")
+        logger.info("Using MongoStore - MongoDB connection successful")
         return store
     except Exception as e:
         raise ConnectionError(f"MongoDB connection failed. Check MONGODB_URI and ensure MongoDB is running. Error: {e}")

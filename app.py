@@ -3,6 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict
 import importlib.util
+import logging
+import os
+from pathlib import Path as PathLib
+import sys
+import re
 
 # Try to load .env automatically when possible (non-fatal)
 dotenv_spec = importlib.util.find_spec("dotenv")
@@ -48,7 +53,7 @@ def _fetch_op_secret(ref: str) -> str:
         return res.stdout.strip()
     except FileNotFoundError:
         # op CLI not available
-        print("[ExternalAPI] 1Password CLI 'op' not found; leaving env var as-is")
+        print(f"[ExternalAPI] 1Password CLI 'op' not found; leaving env var as-is")
         return ref
     except subprocess.CalledProcessError as e:
         print(f"[ExternalAPI] Failed to read 1Password secret {norm}: {e}; leaving env var as-is")
@@ -82,6 +87,163 @@ from models import (
 )
 from storage import STORE
 
+# Configure logging with timestamps and file output
+def setup_logging():
+    """Set up logging with both console and file output with timestamps."""
+    # Import colorama for colored console output
+    try:
+        from colorama import init, Fore, Style
+        init(autoreset=True)  # Automatically reset colors after each print
+        colors_available = True
+        
+        # Add custom log level for API access errors
+        API_ACCESS_ERROR_LEVEL = 35  # Between WARNING (30) and ERROR (40)
+        logging.addLevelName(API_ACCESS_ERROR_LEVEL, "API ACCESS ERROR")
+        
+        color_codes = {
+            'DEBUG': Fore.CYAN,
+            'INFO': Fore.GREEN,
+            'WARNING': Fore.YELLOW,
+            'ERROR': Fore.RED + Style.BRIGHT,
+            'CRITICAL': Fore.RED + Style.BRIGHT,
+            'API ACCESS ERROR': Fore.RED + Style.BRIGHT,
+            # Short auth notes (used in middleware) should be bright red
+            'MISSING TOKEN': Fore.RED + Style.BRIGHT,
+            'INVALID TOKEN': Fore.RED + Style.BRIGHT,
+        }
+        reset_code = Style.RESET_ALL
+    except ImportError:
+        colors_available = False
+        color_codes = {}
+        reset_code = ""
+    
+    # Create logs directory if it doesn't exist
+    log_dir = PathLib("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    # Create log filename with current date
+    log_filename = log_dir / f"hardware_api_{datetime.now().strftime('%Y%m%d')}.log"
+    
+    # Create custom colored formatter for console
+    class ColoredFormatter(logging.Formatter):
+        """Custom formatter that adds colors to console output with HTTP status code coloring."""
+        
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.colors = color_codes
+            self.reset = reset_code
+            # HTTP status code colors - use the outer scope variables
+            if colors_available:
+                from colorama import Fore, Style
+                self.status_colors = {
+                    '200': Fore.GREEN,
+                    '201': Fore.GREEN,
+                    '202': Fore.GREEN,
+                    '204': Fore.GREEN,
+                    '301': Fore.YELLOW,
+                    '302': Fore.YELLOW,
+                    '307': Fore.YELLOW,
+                    '308': Fore.YELLOW,
+                    '400': Fore.RED + Style.BRIGHT,
+                    '401': Fore.RED + Style.BRIGHT,
+                    '403': Fore.RED + Style.BRIGHT,
+                    '404': Fore.RED + Style.BRIGHT,
+                    '422': Fore.RED + Style.BRIGHT,
+                    '429': Fore.RED + Style.BRIGHT,
+                    '500': Fore.RED + Style.BRIGHT,
+                    '502': Fore.RED + Style.BRIGHT,
+                    '503': Fore.RED + Style.BRIGHT,
+                }
+            else:
+                self.status_colors = {}
+        
+        def format(self, record):
+            if colors_available:
+                # Add color to the level name
+                # Our middleware builds messages like: "<IP> - [LEVEL] rest..."
+                # Color the bracketed level label inside the message for clarity.
+                formatted = super().format(record)
+
+                # Color the bracketed level label (e.g., [INFO], [API ACCESS ERROR])
+                level_label_pattern = r"\[([A-Z ]+)\]"
+
+                def color_label(m):
+                    label = m.group(1)
+                    color = self.colors.get(label, None)
+                    if color:
+                        return f"{color}[{label}]{self.reset}"
+                    return m.group(0)
+
+                formatted = re.sub(level_label_pattern, color_label, formatted)
+
+                # Color only the HTTP status code that appears immediately after
+                # the bracketed level label (pattern: "] - <STATUS>"). This avoids
+                # accidentally coloring IP octets (e.g. "204" in "204.76.203.219").
+                status_pattern = r'(?<=\] - )([1-5][0-9]{2})\b'
+
+                def color_status(match):
+                    status = match.group(1)
+                    if status in self.status_colors:
+                        return f"{self.status_colors[status]}{status}{self.reset}"
+                    return status
+
+                formatted = re.sub(status_pattern, color_status, formatted)
+
+                return formatted
+            
+            return super().format(record)
+    
+    # Configure logging format with timestamp. Message will include IP and level label.
+    log_format = '[%(asctime)s] - %(message)s'
+    date_format = '%Y-%m-%d %H:%M:%S'
+    
+    # Create handlers
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(ColoredFormatter(log_format, datefmt=date_format))
+    
+    file_handler = logging.FileHandler(log_filename, mode='a', encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+    
+    # Set up logging configuration
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[console_handler, file_handler]
+    )
+    
+    # Configure uvicorn loggers to use our colored formatter but disable access logging
+    # We'll handle access logging in our middleware instead
+    uvicorn_logger = logging.getLogger("uvicorn")
+    uvicorn_logger.handlers = [console_handler, file_handler]
+    uvicorn_logger.propagate = False
+
+    # Disable uvicorn access logger to avoid duplicate logs
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.handlers = []
+    uvicorn_access_logger.propagate = False
+
+    # Create two specialized loggers: console-only and file-only so we can
+    # selectively include sensitive fragments (like full User-Agent) in file logs
+    console_logger = logging.getLogger("ExternalAPI.console")
+    console_logger.handlers = [console_handler]
+    console_logger.propagate = False
+    console_logger.setLevel(logging.INFO)
+
+    file_logger = logging.getLogger("ExternalAPI.file")
+    file_logger.handlers = [file_handler]
+    file_logger.propagate = False
+    file_logger.setLevel(logging.INFO)
+
+    # Also provide a general app logger (keeps previous behavior for other messages)
+    logger = logging.getLogger("ExternalAPI")
+    logger.handlers = [console_handler, file_handler]
+    logger.propagate = False
+
+    logger.info("Logging initialized - console and file output enabled with colors")
+    return logger
+
+# Initialize logging
+logger = setup_logging()
+
 # Initialize rate limiter
 # Rate limit can be configured via FLXTIME_RATE_LIMIT env var (default: 100 requests per minute)
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
@@ -90,7 +252,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[])
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def verify_bearer_token_flxtime(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
+def verify_bearer_token_flxtime(request: Request, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     """Validate bearer token against API_BEARER_TOKEN_FLXTIME or API_BEARER_TOKEN environment variables.
     
     Used for FlxTime-specific endpoints like /credentials/{miner_key}/exists.
@@ -108,6 +270,8 @@ def verify_bearer_token_flxtime(credentials: HTTPAuthorizationCredentials = Depe
         )
     
     if not credentials:
+        # attach a short auth note for middleware logging and raise
+        request.state.auth_note = "MISSING TOKEN"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication token",
@@ -116,16 +280,19 @@ def verify_bearer_token_flxtime(credentials: HTTPAuthorizationCredentials = Depe
     
     # Accept either the FlxTime-specific token OR the general token
     if credentials.credentials != flxtime_token and credentials.credentials != general_token:
+        request.state.auth_note = "INVALID TOKEN"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
+    # mark success briefly for possible middleware use (optional)
+    request.state.auth_note = "OK"
     return credentials.credentials
 
 
-def verify_bearer_token_general(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
+def verify_bearer_token_general(request: Request, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     """Validate bearer token against API_BEARER_TOKEN environment variable.
     
     Used for general API endpoints (versions, credentials, installations, leases, PoC).
@@ -141,6 +308,7 @@ def verify_bearer_token_general(credentials: HTTPAuthorizationCredentials = Depe
         )
     
     if not credentials:
+        request.state.auth_note = "MISSING TOKEN"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication token",
@@ -148,15 +316,15 @@ def verify_bearer_token_general(credentials: HTTPAuthorizationCredentials = Depe
         )
     
     if credentials.credentials != expected_token:
+        request.state.auth_note = "INVALID TOKEN"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
+    request.state.auth_note = "OK"
     return credentials.credentials
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # On startup: augment generated OpenAPI schema with human-readable
@@ -273,6 +441,145 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Simple in-process tracker for repeated 404 probes and a temporary blocklist.
+# This is intended as a lightweight mitigation for opportunistic scanners.
+# Configurable via environment variables:
+#   PROBE_404_WINDOW (seconds) - sliding window to count 404s (default 60)
+#   PROBE_404_THRESHOLD - number of 404s in window to trigger a block (default 20)
+#   PROBE_BLOCK_SECONDS - how long to block an offender (default 600)
+from collections import defaultdict, deque
+import asyncio
+
+_probe_404_window = int(os.getenv("PROBE_404_WINDOW", "60"))
+_probe_404_threshold = int(os.getenv("PROBE_404_THRESHOLD", "20"))
+_probe_block_seconds = int(os.getenv("PROBE_BLOCK_SECONDS", "600"))
+
+# maps ip -> deque[timestamps_of_404s]
+_probe_404_counters: Dict[str, deque] = defaultdict(lambda: deque())
+# maps ip -> blocked_until_timestamp
+_probe_blocklist: Dict[str, float] = {}
+# lock for concurrency safety
+_probe_lock = asyncio.Lock()
+
+# Add middleware to log HTTP responses with appropriate levels
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = datetime.now()
+    client_ip = request.client.host if request.client else "unknown"
+    # If IP is currently blocked, short-circuit with 403 and log
+    now_ts = datetime.now().timestamp()
+    blocked_until = _probe_blocklist.get(client_ip)
+    if blocked_until and blocked_until > now_ts:
+        # Immediate short-circuit response for blocked IPs
+        # Emit a fail2ban-friendly marker so external tools see repeated-block events
+        try:
+            logger.warning(f"FAILED_PROBE_BLOCK ip={client_ip} blocked_until={blocked_until}")
+        except Exception:
+            logger.warning("FAILED_PROBE_BLOCK ip=%s blocked", client_ip)
+        logger.warning(f"{client_ip} - [WARNING] - 403 BLOCKED - IP temporarily blocked due to repeated probes")
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("Forbidden", status_code=403)
+    response = await call_next(request)
+    
+    # Only log non-static endpoints and important status codes
+    url_path = request.url.path
+    
+    # Skip logging for docs, static files, and health checks
+    if url_path in ["/docs", "/openapi.json", "/redoc", "/health"] or url_path.startswith("/static"):
+        return response
+    
+    # Log the request/response with concise format
+    duration = (datetime.now() - start_time).total_seconds()
+    # client_ip already computed above for early block checks
+    method = request.method
+    status_code = response.status_code
+    # Capture query string and User-Agent for better fingerprinting of probes
+    query_string = request.url.query
+    user_agent = request.headers.get("user-agent")
+    
+    # Pull an optional short auth note from the request (set by auth dependencies)
+    auth_note = getattr(request.state, "auth_note", None)
+    note_suffix = f" - [{auth_note}]" if auth_note and auth_note != "OK" else ""
+
+    # Build the concise message. Format required:
+    # [timestamp] - <IP> - [LEVEL_LABEL] <status> <METHOD> <PATH> - <AUTH_NOTE>
+    # Build an extra suffix with query-string and a shortened user-agent when available
+    qs_suffix = f" - QS: ?{query_string}" if query_string else ""
+    # Shorten User-Agent to avoid long clutter in console logs. Configurable via LOG_UA_MAXLEN.
+    if user_agent:
+        try:
+            max_ua = int(os.getenv("LOG_UA_MAXLEN", "40"))
+        except Exception:
+            max_ua = 40
+        ua_clean = re.sub(r"\s+", " ", user_agent).strip()
+        short_ua = ua_clean if len(ua_clean) <= max_ua else ua_clean[: max_ua - 3] + "..."
+        ua_suffix = f" - UA: {short_ua}"
+    else:
+        ua_suffix = ""
+
+    # Prepare two message variants: console (no UA) and file (with UA)
+    console_msg_base = f"{client_ip} - [{{}}] - {status_code} {method} {url_path}{note_suffix}{qs_suffix}"
+    file_msg_base = f"{client_ip} - [{{}}] - {status_code} {method} {url_path}{note_suffix}{qs_suffix}{ua_suffix}"
+
+    if status_code >= 500:
+        level_label = 'ERROR'
+        console_msg = console_msg_base.format(level_label)
+        file_msg = file_msg_base.format(level_label)
+        logging.getLogger("ExternalAPI.console").error(console_msg)
+        logging.getLogger("ExternalAPI.file").error(file_msg)
+    elif status_code >= 400:
+        level_label = 'API ACCESS ERROR'
+        console_msg = console_msg_base.format(level_label)
+        file_msg = file_msg_base.format(level_label)
+        logging.getLogger("ExternalAPI.console").log(35, console_msg)
+        logging.getLogger("ExternalAPI.file").log(35, file_msg)
+        # Track repeated 404/4xx probes and temporarily block if threshold exceeded
+        try:
+            async with _probe_lock:
+                if status_code == 404:
+                    dq = _probe_404_counters[client_ip]
+                    now_ts = datetime.now().timestamp()
+                    # Emit a machine-parseable marker that fail2ban can watch for
+                    try:
+                        logger.warning(f"FAILED_PROBE_404 ip={client_ip} path={url_path} ua=\"{user_agent or ''}\"")
+                    except Exception:
+                        # safe fallback if formatting fails
+                        logger.warning("FAILED_PROBE_404 ip=%s path=%s", client_ip, url_path)
+                    dq.append(now_ts)
+                    # Trim old timestamps outside the window
+                    while dq and dq[0] < now_ts - _probe_404_window:
+                        dq.popleft()
+                    if len(dq) >= _probe_404_threshold:
+                        # Block the IP for configured duration
+                        _probe_blocklist[client_ip] = now_ts + _probe_block_seconds
+                        # emit a fail2ban-friendly block marker as well
+                        logger.warning(f"FAILED_PROBE_BLOCK ip={client_ip} duration={_probe_block_seconds} reason=404s")
+                        logger.warning(f"{client_ip} - [WARNING] - IP blocked for {_probe_block_seconds}s due to {len(dq)} 404s in {_probe_404_window}s")
+                        dq.clear()
+                else:
+                    # For other 4xx codes we might optionally clear counters or ignore
+                    pass
+        except Exception:
+            # Non-fatal: don't let tracking break request handling
+            logger.debug("probe tracking failed")
+    elif status_code >= 300:
+        level_label = 'WARNING'
+        # If there's a Location header, include redirect target for clarity
+        location = response.headers.get('location') or response.headers.get('Location')
+        redirect_suffix = f" - Redirect -> {location}" if location else ""
+        console_msg = console_msg_base.format(level_label) + redirect_suffix
+        file_msg = file_msg_base.format(level_label) + redirect_suffix
+        logging.getLogger("ExternalAPI.console").warning(console_msg)
+        logging.getLogger("ExternalAPI.file").warning(file_msg)
+    else:
+        level_label = 'INFO'
+        console_msg = console_msg_base.format(level_label)
+        file_msg = file_msg_base.format(level_label)
+        logging.getLogger("ExternalAPI.console").info(console_msg)
+        logging.getLogger("ExternalAPI.file").info(file_msg)
+    
+    return response
+
 # Add rate limit exception handler
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
@@ -292,6 +599,38 @@ def _root_redirect():
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@app.get("/admin/blocks", tags=["Admin"], summary="List temporarily blocked IPs")
+def list_blocked_ips(token: str = Depends(verify_bearer_token_general)) -> Dict[str, Any]:
+    """Return the current in-memory temporary blocklist.
+
+    Note: this blocklist is in-memory and will reset if the app restarts.
+    """
+    now_ts = datetime.now().timestamp()
+    # return only currently blocked IPs with remaining seconds
+    blocked = {ip: max(0, int(until - now_ts)) for ip, until in _probe_blocklist.items() if until > now_ts}
+    return {"blocked": blocked}
+
+
+@app.post("/admin/blocks/unblock", tags=["Admin"], summary="Unblock an IP")
+def unblock_ip(payload: Dict[str, str], token: str = Depends(verify_bearer_token_general)) -> Dict[str, Any]:
+    """Remove an IP from the in-memory blocklist. Expects JSON {"ip": "1.2.3.4"}.
+
+    Emits a fail2ban-friendly UNBLOCK marker for external monitoring.
+    """
+    ip = payload.get("ip")
+    if not ip:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing 'ip' in payload")
+    removed = False
+    if ip in _probe_blocklist:
+        del _probe_blocklist[ip]
+        removed = True
+        try:
+            logger.warning(f"FAILED_PROBE_UNBLOCK ip={ip}")
+        except Exception:
+            logger.warning("FAILED_PROBE_UNBLOCK ip=%s", ip)
+    return {"unblocked": removed}
 
 
 @app.get("/health", tags=["Health"], summary="Health check")
@@ -423,7 +762,7 @@ def acquire_installation_lease(
         status_payload = {"active": bool(granted), "holder_install_id": getattr(record, "holder_install_id", None), "expires_at": expires_iso, "ttl_seconds": ttl}
         return LeaseResponse(granted=granted, **status_payload)
     # fallback: ask the store for status
-    print(f"[API] acquire_installation_lease: FALLBACK calling STORE.lease_status for {miner_key}/{install_id}")
+    logger.debug(f"acquire_installation_lease: FALLBACK calling STORE.lease_status for {miner_key}/{install_id}")
     status_payload = STORE.lease_status(miner_key)
     return LeaseResponse(granted=granted, **status_payload)
 
@@ -461,7 +800,7 @@ def renew_installation_lease(
             ttl = 0
         status_payload = {"active": bool(granted), "holder_install_id": getattr(record, "holder_install_id", None), "expires_at": expires_iso, "ttl_seconds": ttl}
         return LeaseResponse(granted=granted, **status_payload)
-    print(f"[API] renew_installation_lease: FALLBACK calling STORE.lease_status for {miner_key}/{install_id}")
+    logger.debug(f"renew_installation_lease: FALLBACK calling STORE.lease_status for {miner_key}/{install_id}")
     status_payload = STORE.lease_status(miner_key)
     return LeaseResponse(granted=granted, **status_payload)
 
@@ -529,5 +868,16 @@ if __name__ == "__main__":
     reload_env = os.getenv("UVICORN_RELOAD", "false").lower()
     reload_flag = reload_env in ("1", "true", "yes")
 
-    print(f"[ExternalAPI] Starting server on {host}:{port} (reload={reload_flag})")
-    uvicorn.run("app:app", host=host, port=port, reload=reload_flag)
+    logger.info(f"Starting server on {host}:{port} (reload={reload_flag})")
+    
+    # Configure uvicorn to use our existing logging configuration
+    # We'll disable uvicorn's log_config to preserve our colored formatting
+    uvicorn.run(
+        "app:app", 
+        host=host, 
+        port=port, 
+        reload=reload_flag,
+        log_config=None,  # Use existing logging configuration
+        access_log=False,  # Disable uvicorn access logging - we handle it in middleware
+        use_colors=False   # Disable uvicorn colors since we handle our own
+    )
