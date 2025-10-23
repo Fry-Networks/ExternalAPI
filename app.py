@@ -325,6 +325,48 @@ def verify_bearer_token_general(request: Request, credentials: HTTPAuthorization
 
     request.state.auth_note = "OK"
     return credentials.credentials
+
+
+def verify_bearer_token_admin(request: Request, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
+    """Validate bearer token against API_BEARER_TOKEN_ADMIN environment variable.
+
+    This token is intended for protecting admin-only endpoints (unblock/list operations).
+    Falls back to API_BEARER_TOKEN if API_BEARER_TOKEN_ADMIN is not configured (for smooth upgrades).
+    """
+    admin_token = os.getenv("API_BEARER_TOKEN_ADMIN")
+    general_token = os.getenv("API_BEARER_TOKEN")
+
+    # If no admin-specific token is configured, allow the general token only if present.
+    if not admin_token and not general_token:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API_BEARER_TOKEN_ADMIN or API_BEARER_TOKEN not configured on server"
+        )
+
+    if not credentials:
+        request.state.auth_note = "MISSING TOKEN"
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Prefer admin_token if set; otherwise accept general_token
+    if admin_token:
+        valid = credentials.credentials == admin_token
+    else:
+        valid = credentials.credentials == general_token
+
+    if not valid:
+        request.state.auth_note = "INVALID TOKEN"
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    request.state.auth_note = "OK"
+    return credentials.credentials
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # On startup: augment generated OpenAPI schema with human-readable
@@ -602,7 +644,7 @@ def utc_now() -> datetime:
 
 
 @app.get("/admin/blocks", tags=["Admin"], summary="List temporarily blocked IPs")
-def list_blocked_ips(token: str = Depends(verify_bearer_token_general)) -> Dict[str, Any]:
+def list_blocked_ips(token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
     """Return the current in-memory temporary blocklist.
 
     Note: this blocklist is in-memory and will reset if the app restarts.
@@ -614,7 +656,7 @@ def list_blocked_ips(token: str = Depends(verify_bearer_token_general)) -> Dict[
 
 
 @app.post("/admin/blocks/unblock", tags=["Admin"], summary="Unblock an IP")
-def unblock_ip(payload: Dict[str, str], token: str = Depends(verify_bearer_token_general)) -> Dict[str, Any]:
+def unblock_ip(payload: Dict[str, str], token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
     """Remove an IP from the in-memory blocklist. Expects JSON {"ip": "1.2.3.4"}.
 
     Emits a fail2ban-friendly UNBLOCK marker for external monitoring.

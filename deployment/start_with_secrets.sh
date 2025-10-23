@@ -83,6 +83,7 @@ resolve_op_var() {
 resolve_op_var MONGODB_URI
 resolve_op_var API_BEARER_TOKEN
 resolve_op_var API_BEARER_TOKEN_FLXTIME
+resolve_op_var API_BEARER_TOKEN_ADMIN
 
 echo ""
 echo "Step 3: Setting up environment..."
@@ -94,6 +95,7 @@ export UVICORN_RELOAD=false
 export MONGODB_URI="$MONGODB_URI"
 export API_BEARER_TOKEN="$API_BEARER_TOKEN"
 export API_BEARER_TOKEN_FLXTIME="$API_BEARER_TOKEN_FLXTIME"
+export API_BEARER_TOKEN_ADMIN="$API_BEARER_TOKEN_ADMIN"
 
 echo "✅ Environment variables configured"
 echo "   - Port: $PORT"
