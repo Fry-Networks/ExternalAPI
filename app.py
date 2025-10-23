@@ -387,42 +387,10 @@ async def lifespan(app: FastAPI):
             "IRM": "Indoor Radiation Miner",
         }
 
-        # Generate the OpenAPI schema once and attach descriptions
+        # Generate and cache the OpenAPI schema once. Avoid injecting
+        # vendor-specific fields such as `x-enum-descriptions` into the
+        # parameter schemas to prevent raw lists from showing in the UI.
         openapi_schema = app.openapi()
-        schemas = openapi_schema.get("components", {}).get("schemas", {})
-        for name, schema in schemas.items():
-            enum_vals = schema.get("enum", [])
-            if enum_vals and set(enum_vals) & set(enum_desc.keys()):
-                schema["x-enum-descriptions"] = [enum_desc.get(v, "") for v in enum_vals]
-
-        # Also attach enum descriptions to operation parameters so Swagger UI
-        # can show descriptions near the selected value in the parameter UI.
-        try:
-            paths = openapi_schema.get("paths", {})
-            for path, ops in paths.items():
-                for op, opobj in ops.items():
-                    # each operation can have a 'parameters' list
-                    params = opobj.get("parameters") or []
-                    for p in params:
-                        # Parameter may be inline schema or a $ref
-                        schema = p.get("schema") or {}
-                        # If schema is a $ref, resolve to the component schema
-                        ref = schema.get("$ref")
-                        target_schema = None
-                        if ref and ref.startswith("#/components/schemas/"):
-                            key = ref.split("/")[-1]
-                            target_schema = schemas.get(key)
-                        else:
-                            target_schema = schema
-
-                        if target_schema:
-                            enum_vals = target_schema.get("enum", [])
-                            if enum_vals and set(enum_vals) & set(enum_desc.keys()):
-                                # attach matching descriptions in the same order
-                                p["x-enum-descriptions"] = [enum_desc.get(v, "") for v in enum_vals]
-        except Exception:
-            # Non-fatal; keep going even if parameter-level augmentation fails
-            pass
 
         def _cached_openapi():
             return openapi_schema
