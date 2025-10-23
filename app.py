@@ -702,14 +702,9 @@ def check_miner_exists(
     token: str = Depends(verify_bearer_token_flxtime)
 ) -> ExistsResponse:
     """Check whether a miner_key exists in the credentials database.
-    
+
     This endpoint is specifically designed for FlxTime partner integration.
-    
-    Authentication: Requires bearer token authentication via Authorization header.
-    Accepts either API_BEARER_TOKEN_FLXTIME (FlxTime-specific) or API_BEARER_TOKEN (general).
-    
-    Rate Limiting: Limited to 100 requests per minute per IP (configurable via FLXTIME_RATE_LIMIT).
-    
+
     Returns {"exists": true} if found, {"exists": false} otherwise.
     """
     profile = STORE.get_miner_profile(miner_key)
