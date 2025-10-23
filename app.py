@@ -483,10 +483,10 @@ async def log_requests(request: Request, call_next):
         # Immediate short-circuit response for blocked IPs
         # Emit a fail2ban-friendly marker so external tools see repeated-block events
         try:
-            logger.warning(f"FAILED_PROBE_BLOCK ip={client_ip} blocked_until={blocked_until}")
+            logging.getLogger("ExternalAPI.file").warning(f"FAILED_PROBE_BLOCK ip={client_ip} blocked_until={blocked_until}")
         except Exception:
-            logger.warning("FAILED_PROBE_BLOCK ip=%s blocked", client_ip)
-        logger.warning(f"{client_ip} - [WARNING] - 403 BLOCKED - IP temporarily blocked due to repeated probes")
+            logging.getLogger("ExternalAPI.file").warning("FAILED_PROBE_BLOCK ip=%s blocked", client_ip)
+        logging.getLogger("ExternalAPI.console").warning(f"{client_ip} - [WARNING] - 403 BLOCKED - IP temporarily blocked due to repeated probes")
         from fastapi.responses import PlainTextResponse
         return PlainTextResponse("Forbidden", status_code=403)
     response = await call_next(request)
@@ -551,10 +551,10 @@ async def log_requests(request: Request, call_next):
                     now_ts = datetime.now().timestamp()
                     # Emit a machine-parseable marker that fail2ban can watch for
                     try:
-                        logger.warning(f"FAILED_PROBE_404 ip={client_ip} path={url_path} ua=\"{user_agent or ''}\"")
+                        logging.getLogger("ExternalAPI.file").warning(f"FAILED_PROBE_404 ip={client_ip} path={url_path} ua=\"{user_agent or ''}\"")
                     except Exception:
                         # safe fallback if formatting fails
-                        logger.warning("FAILED_PROBE_404 ip=%s path=%s", client_ip, url_path)
+                        logging.getLogger("ExternalAPI.file").warning("FAILED_PROBE_404 ip=%s path=%s", client_ip, url_path)
                     dq.append(now_ts)
                     # Trim old timestamps outside the window
                     while dq and dq[0] < now_ts - _probe_404_window:
@@ -562,9 +562,10 @@ async def log_requests(request: Request, call_next):
                     if len(dq) >= _probe_404_threshold:
                         # Block the IP for configured duration
                         _probe_blocklist[client_ip] = now_ts + _probe_block_seconds
-                        # emit a fail2ban-friendly block marker as well
-                        logger.warning(f"FAILED_PROBE_BLOCK ip={client_ip} duration={_probe_block_seconds} reason=404s")
-                        logger.warning(f"{client_ip} - [WARNING] - IP blocked for {_probe_block_seconds}s due to {len(dq)} 404s in {_probe_404_window}s")
+                        # emit a fail2ban-friendly block marker as well (file-only)
+                        logging.getLogger("ExternalAPI.file").warning(f"FAILED_PROBE_BLOCK ip={client_ip} duration={_probe_block_seconds} reason=404s")
+                        # user-visible console message (UA not included)
+                        logging.getLogger("ExternalAPI.console").warning(f"{client_ip} - [WARNING] - IP blocked for {_probe_block_seconds}s due to {len(dq)} 404s in {_probe_404_window}s")
                         dq.clear()
                 else:
                     # For other 4xx codes we might optionally clear counters or ignore
@@ -637,9 +638,9 @@ def unblock_ip(payload: Dict[str, str], token: str = Depends(verify_bearer_token
         del _probe_blocklist[ip]
         removed = True
         try:
-            logger.warning(f"FAILED_PROBE_UNBLOCK ip={ip}")
+            logging.getLogger("ExternalAPI.file").warning(f"FAILED_PROBE_UNBLOCK ip={ip}")
         except Exception:
-            logger.warning("FAILED_PROBE_UNBLOCK ip=%s", ip)
+            logging.getLogger("ExternalAPI.file").warning("FAILED_PROBE_UNBLOCK ip=%s", ip)
     return {"unblocked": removed}
 
 
