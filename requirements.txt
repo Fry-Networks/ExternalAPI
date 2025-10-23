@@ -6,3 +6,6 @@ pymongo==4.4.0
 
 # Optional: load .env files into environment at process start
 python-dotenv==1.0.0
+
+# Rate limiting
+slowapi==0.1.9

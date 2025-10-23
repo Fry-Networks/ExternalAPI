@@ -209,3 +209,18 @@ for _model, _example in _MODEL_EXAMPLES:
 
 class GenericOk(BaseModel):
     ok: bool = True
+
+
+class ExistsResponse(BaseModel):
+    """Response indicating whether a miner_key exists in creds.hardware."""
+    exists: bool = Field(..., description="True if the miner_key exists in creds.hardware, False otherwise")
+    
+    class Config:
+        pass
+
+
+# Attach example for ExistsResponse
+if _pyd_major >= 2:
+    setattr(ExistsResponse.Config, "json_schema_extra", {"example": {"exists": True}})
+else:
+    setattr(ExistsResponse.Config, "schema_extra", {"example": {"exists": True}})

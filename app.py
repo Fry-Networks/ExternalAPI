@@ -60,11 +60,16 @@ for k, v in list(os.environ.items()):
     if isinstance(v, str) and (v.startswith("op/") or v.startswith("op://")):
         os.environ[k] = _fetch_op_secret(v)
 
-from fastapi import Body, FastAPI, HTTPException, Path, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Path, Request, status
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from models import (
+    ExistsResponse,
     GenericOk,
     HardwareDocument,
     HardwareResponse,
@@ -76,6 +81,81 @@ from models import (
     MinerCode,
 )
 from storage import STORE
+
+# Initialize rate limiter
+# Rate limit can be configured via FLXTIME_RATE_LIMIT env var (default: 100 requests per minute)
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
+
+# Bearer token security schemes for protected endpoints
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def verify_bearer_token_flxtime(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
+    """Validate bearer token against API_BEARER_TOKEN_FLXTIME or API_BEARER_TOKEN environment variables.
+    
+    Used for FlxTime-specific endpoints like /credentials/{miner_key}/exists.
+    Accepts either the FlxTime-specific token OR the general API token.
+    Raises HTTPException 401 if token is missing or invalid.
+    Returns the token if valid.
+    """
+    flxtime_token = os.getenv("API_BEARER_TOKEN_FLXTIME")
+    general_token = os.getenv("API_BEARER_TOKEN")
+    
+    if not flxtime_token and not general_token:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API_BEARER_TOKEN_FLXTIME or API_BEARER_TOKEN not configured on server"
+        )
+    
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Accept either the FlxTime-specific token OR the general token
+    if credentials.credentials != flxtime_token and credentials.credentials != general_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return credentials.credentials
+
+
+def verify_bearer_token_general(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
+    """Validate bearer token against API_BEARER_TOKEN environment variable.
+    
+    Used for general API endpoints (versions, credentials, installations, leases, PoC).
+    Raises HTTPException 401 if token is missing or invalid.
+    Returns the token if valid.
+    """
+    expected_token = os.getenv("API_BEARER_TOKEN")
+    
+    if not expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API_BEARER_TOKEN not configured on server"
+        )
+    
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if credentials.credentials != expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return credentials.credentials
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -160,6 +240,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Add rate limit exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
 
 # Redirect root to the interactive docs to provide a friendly public entrypoint.
 @app.get("/", include_in_schema=False)
@@ -200,6 +284,7 @@ def health() -> Dict[str, Any]:
 )
 def get_required_version(
     miner_code: MinerCode = Path(...),
+    token: str = Depends(verify_bearer_token_general)
 ) -> VersionResponse:
     # MinerCode is an enum; use its value (e.g. 'AEM') when querying the store
     version = STORE.get_required_version(miner_code.value)
@@ -214,9 +299,38 @@ def get_required_version(
     summary="Get miner credentials/profile",
     tags=["Credentials"],
 )
-def get_miner_profile(miner_key: str = Path(..., description="Full miner key")) -> MinerProfileResponse:
+def get_miner_profile(
+    miner_key: str = Path(..., description="Full miner key"),
+    token: str = Depends(verify_bearer_token_general)
+) -> MinerProfileResponse:
     profile = STORE.get_miner_profile(miner_key)
     return MinerProfileResponse(**profile)
+
+
+@app.get(
+    "/credentials/{miner_key}/exists",
+    response_model=ExistsResponse,
+    summary="Check if miner_key exists",
+    tags=["Credentials"],
+)
+@limiter.limit(os.getenv("FLXTIME_RATE_LIMIT", "100/minute"))
+def check_miner_exists(
+    request: Request,
+    miner_key: str = Path(..., description="Full miner key"),
+    token: str = Depends(verify_bearer_token_flxtime)
+) -> ExistsResponse:
+    """Check whether a miner_key exists.
+    
+    Requires bearer token authentication via Authorization header.
+    Accepts either API_BEARER_TOKEN_FLXTIME or API_BEARER_TOKEN.
+    
+    Rate limited to 100 requests per minute per IP (configurable via FLXTIME_RATE_LIMIT).
+    
+    Returns {"exists": true} if found, {"exists": false} otherwise.
+    """
+    profile = STORE.get_miner_profile(miner_key)
+    exists = profile.get("exists", False)
+    return ExistsResponse(exists=exists)
 
 
 @app.post(
@@ -230,6 +344,7 @@ def upsert_installation(
     miner_key: str,
     install_id: str,
     heartbeat: InstallationHeartbeat,
+    token: str = Depends(verify_bearer_token_general)
 ) -> GenericOk:
     if heartbeat.miner_key != miner_key or heartbeat.install_id != install_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body miner identity mismatch")
@@ -249,6 +364,7 @@ def acquire_installation_lease(
     miner_key: str,
     install_id: str,
     action: LeaseAction = Body(default_factory=LeaseAction),
+    token: str = Depends(verify_bearer_token_general)
 ) -> LeaseResponse:
     granted, record = STORE.acquire_lease(miner_key, install_id, action.lease_seconds)
     # Use the returned LeaseRecord (if provided) to avoid an extra status DB call.
@@ -287,6 +403,7 @@ def renew_installation_lease(
     miner_key: str,
     install_id: str,
     action: LeaseAction = Body(default_factory=LeaseAction),
+    token: str = Depends(verify_bearer_token_general)
 ) -> LeaseResponse:
     granted, record = STORE.renew_lease(miner_key, install_id, action.lease_seconds)
     # Use returned LeaseRecord to avoid an extra status call when possible
@@ -320,7 +437,10 @@ def renew_installation_lease(
     summary="Get current lease status",
     tags=["Leases"],
 )
-def lease_status(miner_key: str) -> LeaseResponse:
+def lease_status(
+    miner_key: str,
+    token: str = Depends(verify_bearer_token_general)
+) -> LeaseResponse:
     status_payload = STORE.lease_status(miner_key)
     # Expose False if no active lease.
     return LeaseResponse(granted=status_payload.get("active", False), **status_payload)
@@ -332,7 +452,10 @@ def lease_status(miner_key: str) -> LeaseResponse:
     summary="Get PoC hardware document",
     tags=["PoC"],
 )
-def get_hardware_doc(miner_key: str) -> HardwareResponse:
+def get_hardware_doc(
+    miner_key: str,
+    token: str = Depends(verify_bearer_token_general)
+) -> HardwareResponse:
     doc = STORE.get_hardware_doc(miner_key)
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No hardware document")
@@ -346,7 +469,11 @@ def get_hardware_doc(miner_key: str) -> HardwareResponse:
     summary="Replace PoC hardware document",
     tags=["PoC"],
 )
-def put_hardware_doc(miner_key: str, payload: HardwareDocument) -> GenericOk:
+def put_hardware_doc(
+    miner_key: str,
+    payload: HardwareDocument,
+    token: str = Depends(verify_bearer_token_general)
+) -> GenericOk:
     document = dict(payload.document)
     document.setdefault("miner_key", miner_key)
     document.setdefault("lastUpdated", utc_now().isoformat())
