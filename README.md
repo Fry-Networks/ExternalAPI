@@ -15,8 +15,9 @@ ExternalAPI/
 └── deployment/               # Deployment files
     ├── deploy.sh            # Automated VPS deployment script
     ├── quick-deploy.sh      # One-liner deployment script
+    ├── start_with_secrets.sh # Secure startup script with 1Password integration
     ├── ecosystem.config.js  # PM2 process manager configuration
-   ├── hardware_exe_api.service # Systemd service definition (install as /etc/systemd/system/hardware_exe_api.service)
+    ├── hardware_exe_api.service # Systemd service definition
     ├── Dockerfile          # Docker container definition
     └── docker-compose.yml  # Docker Compose configuration
 ```
@@ -74,7 +75,20 @@ python -m uvicorn app:app --reload --host 127.0.0.1 --port 8080
 
 ### Manual Deployment Options
 
-#### Option 1: Using systemd (Recommended)
+#### Option 1: Using Secure Startup Script (Recommended)
+```bash
+# First, sign in to 1Password
+eval $(op signin --account frynetworks)
+
+# Start the application with secure secret management
+./deployment/start_with_secrets.sh
+```
+This script automatically:
+- Resolves MongoDB connection string from 1Password
+- Sets up all environment variables securely
+- Starts the application with proper configuration
+
+#### Option 2: Using systemd
 ```bash
 # Start/stop/restart the service
 sudo systemctl start hardware_exe_api
@@ -85,7 +99,7 @@ sudo systemctl restart hardware_exe_api
 sudo journalctl -u hardware_exe_api -f
 ```
 
-#### Option 2: Using PM2
+#### Option 3: Using PM2
 ```bash
 cd /opt/hardware_exe_api
 pm2 start deployment/ecosystem.config.js

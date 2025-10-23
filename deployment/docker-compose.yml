@@ -19,17 +19,17 @@ services:
       retries: 3
       start_period: 40s
 
-  # Optional: Add MongoDB service
-  # mongodb:
-  #   image: mongo:7
-  #   ports:
-  #     - "27017:27017"
-  #   environment:
-  #     - MONGO_INITDB_ROOT_USERNAME=admin
-  #     - MONGO_INITDB_ROOT_PASSWORD=password
-  #   volumes:
-  #     - mongodb_data:/data/db
-  #   restart: unless-stopped
+  # MongoDB service
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=password
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
 
   # Optional: Add nginx reverse proxy
   # nginx:
@@ -45,4 +45,5 @@ services:
   #   restart: unless-stopped
 
 # volumes:
-#   mongodb_data:
+volumes:
+  mongodb_data:
