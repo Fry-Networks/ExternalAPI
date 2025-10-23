@@ -224,6 +224,38 @@ async def lifespan(app: FastAPI):
     yield
 
 
+# Define tags metadata to control the order and descriptions in the documentation
+tags_metadata = [
+    {
+        "name": "FlxTime",
+        "description": "Special endpoints for FlxTime partner integration. These endpoints require specific authentication tokens and have dedicated rate limiting.",
+    },
+    {
+        "name": "Health",
+        "description": "Service health and status endpoints.",
+    },
+    {
+        "name": "Versions",
+        "description": "Hardware miner software version management.",
+    },
+    {
+        "name": "Credentials",
+        "description": "Credential and profile lookup from the credentials database.",
+    },
+    {
+        "name": "Installations",
+        "description": "Installation heartbeats and tracking.",
+    },
+    {
+        "name": "Leases",
+        "description": "Lease coordination and management.",
+    },
+    {
+        "name": "PoC",
+        "description": "Proof of Connectivity (PoC) document storage and retrieval.",
+    },
+]
+
 app = FastAPI(
     title="Hardware API",
     version="1.0.0",
@@ -237,6 +269,7 @@ app = FastAPI(
         "Endpoints are grouped by functional area in the UI. Request/response schemas"
         " are documented using Pydantic models in `models.py`."
     ),
+    openapi_tags=tags_metadata,
     lifespan=lifespan,
 )
 
@@ -311,7 +344,7 @@ def get_miner_profile(
     "/credentials/{miner_key}/exists",
     response_model=ExistsResponse,
     summary="Check if miner_key exists",
-    tags=["Credentials"],
+    tags=["FlxTime"],
 )
 @limiter.limit(os.getenv("FLXTIME_RATE_LIMIT", "100/minute"))
 def check_miner_exists(
@@ -319,12 +352,14 @@ def check_miner_exists(
     miner_key: str = Path(..., description="Full miner key"),
     token: str = Depends(verify_bearer_token_flxtime)
 ) -> ExistsResponse:
-    """Check whether a miner_key exists.
+    """Check whether a miner_key exists in the credentials database.
     
-    Requires bearer token authentication via Authorization header.
-    Accepts either API_BEARER_TOKEN_FLXTIME or API_BEARER_TOKEN.
+    This endpoint is specifically designed for FlxTime partner integration.
     
-    Rate limited to 100 requests per minute per IP (configurable via FLXTIME_RATE_LIMIT).
+    Authentication: Requires bearer token authentication via Authorization header.
+    Accepts either API_BEARER_TOKEN_FLXTIME (FlxTime-specific) or API_BEARER_TOKEN (general).
+    
+    Rate Limiting: Limited to 100 requests per minute per IP (configurable via FLXTIME_RATE_LIMIT).
     
     Returns {"exists": true} if found, {"exists": false} otherwise.
     """
