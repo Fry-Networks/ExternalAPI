@@ -435,8 +435,8 @@ tags_metadata = [
 ]
 
 app = FastAPI(
-    title="Hardware API",
-    version="1.0.0",
+    title="FryNetworks Hardware API",
+    version="2.0.0",
     summary="Reference implementation of the FryNetworks hardware miner HTTP contract.",
     description=(
         "This service exposes endpoints for: \n"
@@ -445,7 +445,7 @@ app = FastAPI(
         " - Installation heartbeats and lease coordination (PoC database)\n"
         " - Hardware/PoC document storage\n\n"
         "Endpoints are grouped by functional area in the UI. Request/response schemas"
-        " are documented using Pydantic models in `models.py`."
+        " are documented using Pydantic models"
     ),
     openapi_tags=tags_metadata,
     lifespan=lifespan,
@@ -470,6 +470,26 @@ _probe_404_counters: Dict[str, deque] = defaultdict(lambda: deque())
 _probe_blocklist: Dict[str, float] = {}
 # lock for concurrency safety
 _probe_lock = asyncio.Lock()
+
+# Sensitive filenames that indicate probing for config files or secrets.
+# If repeated within a short window, we will immediately block the offender.
+_sensitive_paths = [
+    "/wp-config.php",
+    "/.env",
+    "/config.json",
+    "/config.js",
+    "/aws-config.js",
+    "/aws.config.js",
+    "/client_secrets.json",
+    "/.gitlab-ci/.env",
+    "/.env.example",
+]
+# maps ip -> deque[timestamps_of_sensitive_tries]
+_sensitive_counters: Dict[str, deque] = defaultdict(lambda: deque())
+
+# Sensitivity thresholds
+_sensitive_window = int(os.getenv("SENSITIVE_WINDOW", "30"))
+_sensitive_threshold = int(os.getenv("SENSITIVE_THRESHOLD", "3"))
 
 # Add middleware to log HTTP responses with appropriate levels
 @app.middleware("http")
@@ -559,6 +579,26 @@ async def log_requests(request: Request, call_next):
                     # Trim old timestamps outside the window
                     while dq and dq[0] < now_ts - _probe_404_window:
                         dq.popleft()
+                    # Check for sensitive path probes and handle immediate blocking
+                    try:
+                        for sensitive in _sensitive_paths:
+                            # simple substring match to catch variants
+                            if sensitive in url_path:
+                                sc = _sensitive_counters[client_ip]
+                                sc.append(now_ts)
+                                # trim old entries
+                                while sc and sc[0] < now_ts - _sensitive_window:
+                                    sc.popleft()
+                                if len(sc) >= _sensitive_threshold:
+                                    # immediate block
+                                    _probe_blocklist[client_ip] = now_ts + _probe_block_seconds
+                                    logging.getLogger("ExternalAPI.file").warning(f"FAILED_SENSITIVE_PROBE ip={client_ip} path={url_path} count={len(sc)}")
+                                    logging.getLogger("ExternalAPI.console").warning(f"{client_ip} - [WARNING] - IP blocked for {_probe_block_seconds}s due to sensitive probes")
+                                    sc.clear()
+                                    dq.clear()
+                                    break
+                    except Exception:
+                        logging.getLogger("ExternalAPI.file").debug("sensitive probe detection failed for %s", client_ip)
                     if len(dq) >= _probe_404_threshold:
                         # Block the IP for configured duration
                         _probe_blocklist[client_ip] = now_ts + _probe_block_seconds
