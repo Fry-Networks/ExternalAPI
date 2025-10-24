@@ -67,9 +67,11 @@ for k, v in list(os.environ.items()):
         os.environ[k] = _fetch_op_secret(v)
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Path, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
+from fastapi.openapi.utils import get_openapi
+from fastapi.openapi.docs import get_swagger_ui_html
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -368,6 +370,52 @@ def verify_bearer_token_admin(request: Request, credentials: HTTPAuthorizationCr
 
     request.state.auth_note = "OK"
     return credentials.credentials
+_openapi_full = None
+_openapi_admin = None
+_openapi_flxtime = None
+_openapi_general = None
+_openapi_public = None
+
+
+def _build_full_openapi(app: FastAPI):
+    return get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+
+def _filter_schema_by_roles(schema: Dict[str, Any], include_admin: bool, include_flxtime: bool, public_only: bool = False) -> Dict[str, Any]:
+    import copy
+    filtered = copy.deepcopy(schema)
+    paths = filtered.get("paths", {})
+    new_paths = {}
+    for path, ops in paths.items():
+        new_ops = {}
+        for method, op in ops.items():
+            if not isinstance(op, dict):
+                continue
+            tags = op.get("tags", [])
+            # Public only: include only Health tag
+            if public_only:
+                if "Health" in tags:
+                    new_ops[method] = op
+                continue
+            # Filter admin
+            if not include_admin and "Admin" in tags:
+                continue
+            # Filter FlxTime
+            if not include_flxtime and "FlxTime" in tags:
+                continue
+            # Otherwise include
+            new_ops[method] = op
+        if new_ops:
+            new_paths[path] = new_ops
+    filtered["paths"] = new_paths
+    return filtered
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # On startup: augment generated OpenAPI schema with human-readable
@@ -391,12 +439,14 @@ async def lifespan(app: FastAPI):
         # Generate and cache the OpenAPI schema once. Avoid injecting
         # vendor-specific fields such as `x-enum-descriptions` into the
         # parameter schemas to prevent raw lists from showing in the UI.
-        openapi_schema = app.openapi()
-
-        def _cached_openapi():
-            return openapi_schema
-
-        app.openapi = _cached_openapi
+        # Build and cache a base OpenAPI (will be further filtered per role routes)
+        global _openapi_full, _openapi_admin, _openapi_flxtime, _openapi_general, _openapi_public
+        _openapi_full = _build_full_openapi(app)
+        # Derive role-based variants
+        _openapi_admin = _openapi_full
+        _openapi_flxtime = _filter_schema_by_roles(_openapi_full, include_admin=False, include_flxtime=True)
+        _openapi_general = _filter_schema_by_roles(_openapi_full, include_admin=False, include_flxtime=True)
+        _openapi_public = _filter_schema_by_roles(_openapi_full, include_admin=False, include_flxtime=False, public_only=True)
     except Exception:
         # Non-fatal; continue startup even if we couldn't augment OpenAPI
         pass
@@ -962,7 +1012,7 @@ def unblock_ip(payload: Dict[str, str], token: str = Depends(verify_bearer_token
 
 
 # Whitelist admin endpoints (hidden from OpenAPI by default)
-@app.get("/admin/whitelist", tags=["Admin"], summary="List whitelisted entries", include_in_schema=False)
+@app.get("/admin/whitelist", tags=["Admin"], summary="List whitelisted entries")
 def admin_whitelist_list(token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
     """List effective whitelist entries. Returns normalized IPs and CIDRs."""
     ips = sorted(list(_ip_whitelist_ips))
@@ -972,7 +1022,7 @@ def admin_whitelist_list(token: str = Depends(verify_bearer_token_admin)) -> Dic
     return {"ips": ips, "cidrs": cidrs, "file": file_list}
 
 
-@app.post("/admin/whitelist", tags=["Admin"], summary="Add whitelist entry", include_in_schema=False)
+@app.post("/admin/whitelist", tags=["Admin"], summary="Add whitelist entry")
 def admin_whitelist_add(payload: Dict[str, str], token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
     entry = (payload or {}).get("entry")
     if not entry:
@@ -986,7 +1036,7 @@ def admin_whitelist_add(payload: Dict[str, str], token: str = Depends(verify_bea
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to add whitelist entry")
 
 
-@app.post("/admin/whitelist/remove", tags=["Admin"], summary="Remove whitelist entry", include_in_schema=False)
+@app.post("/admin/whitelist/remove", tags=["Admin"], summary="Remove whitelist entry")
 def admin_whitelist_remove(payload: Dict[str, str], token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
     entry = (payload or {}).get("entry")
     if not entry:
@@ -1012,6 +1062,48 @@ def health() -> Dict[str, Any]:
         "port": int(os.getenv("PORT", "8081")),
         "time": utc_now().isoformat(),
     }
+
+
+# Role-based OpenAPI JSON endpoints (protected)
+@app.get("/openapi/admin.json", include_in_schema=False)
+def openapi_admin(token: str = Depends(verify_bearer_token_admin)):
+    return JSONResponse(_openapi_admin)
+
+
+@app.get("/openapi/flxtime.json", include_in_schema=False)
+def openapi_flxtime(token: str = Depends(verify_bearer_token_flxtime)):
+    return JSONResponse(_openapi_flxtime)
+
+
+@app.get("/openapi/general.json", include_in_schema=False)
+def openapi_general(token: str = Depends(verify_bearer_token_general)):
+    return JSONResponse(_openapi_general)
+
+
+@app.get("/openapi/public.json", include_in_schema=False)
+def openapi_public():
+    return JSONResponse(_openapi_public)
+
+
+# Role-based Swagger UI endpoints (protected)
+@app.get("/docs/admin", include_in_schema=False)
+def docs_admin(token: str = Depends(verify_bearer_token_admin)):
+    return get_swagger_ui_html(openapi_url="/openapi/admin.json", title="Admin API Docs")
+
+
+@app.get("/docs/flxtime", include_in_schema=False)
+def docs_flxtime(token: str = Depends(verify_bearer_token_flxtime)):
+    return get_swagger_ui_html(openapi_url="/openapi/flxtime.json", title="FlxTime API Docs")
+
+
+@app.get("/docs/general", include_in_schema=False)
+def docs_general(token: str = Depends(verify_bearer_token_general)):
+    return get_swagger_ui_html(openapi_url="/openapi/general.json", title="General API Docs")
+
+
+@app.get("/docs", include_in_schema=False)
+def docs_public():
+    return get_swagger_ui_html(openapi_url="/openapi/public.json", title="Public API Docs")
 
 
 
