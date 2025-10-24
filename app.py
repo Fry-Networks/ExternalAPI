@@ -395,21 +395,22 @@ def _filter_schema_by_roles(schema: Dict[str, Any], include_admin: bool, include
         new_ops = {}
         for method, op in ops.items():
             if not isinstance(op, dict):
+                new_ops[method] = op
                 continue
             tags = op.get("tags", [])
             # Public only: include only Health tag
             if public_only:
                 if "Health" in tags:
                     new_ops[method] = op
-                continue
-            # Filter admin
-            if not include_admin and "Admin" in tags:
-                continue
-            # Filter FlxTime
-            if not include_flxtime and "FlxTime" in tags:
-                continue
-            # Otherwise include
-            new_ops[method] = op
+            else:
+                # Filter admin
+                if not include_admin and "Admin" in tags:
+                    continue
+                # Filter FlxTime
+                if not include_flxtime and "FlxTime" in tags:
+                    continue
+                # Otherwise include
+                new_ops[method] = op
         if new_ops:
             new_paths[path] = new_ops
     filtered["paths"] = new_paths
