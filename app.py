@@ -8,6 +8,7 @@ import os
 from pathlib import Path as PathLib
 import sys
 import re
+import ipaddress
 
 # Try to load .env automatically when possible (non-fatal)
 dotenv_spec = importlib.util.find_spec("dotenv")
@@ -416,6 +417,42 @@ async def lifespan(app: FastAPI):
                             logging.getLogger("ExternalAPI.file").warning(f"LOADED_PERSISTENT_BAN ip={ip} reason={entry.get('reason')}")
     except Exception:
         logging.getLogger("ExternalAPI.file").debug("failed to load persistent bans")
+
+    # Load whitelist from env and file
+    try:
+        import json
+        # from env
+        env_wl = os.getenv("WHITELIST_IPS", "")
+        items = [x.strip() for x in env_wl.split(",") if x.strip()]
+        # from file
+        wl_file = PathLib("deployment/whitelist_ips.json")
+        if wl_file.exists():
+            file_items = json.loads(wl_file.read_text(encoding="utf-8")) or []
+            if isinstance(file_items, list):
+                items.extend([x for x in file_items if isinstance(x, str)])
+        # parse items
+        for item in items:
+            try:
+                if "/" in item:
+                    net = ipaddress.ip_network(item, strict=False)
+                    _ip_whitelist_nets.append(net)
+                else:
+                    # validate IP and store normalized string
+                    ip_str = str(ipaddress.ip_address(item))
+                    _ip_whitelist_ips.add(ip_str)
+            except Exception:
+                logging.getLogger("ExternalAPI.file").debug("invalid whitelist entry: %s", item)
+        # Remove any whitelisted IPs from blocklist for cleanliness
+        for ip in list(_probe_blocklist.keys()):
+            try:
+                if _is_whitelisted(ip):
+                    _probe_blocklist.pop(ip, None)
+                    logging.getLogger("ExternalAPI.file").warning(f"WHITELIST_UNBLOCK_AT_STARTUP ip={ip}")
+            except Exception:
+                continue
+    except Exception:
+        logging.getLogger("ExternalAPI.file").debug("failed to load whitelist")
+
     yield
 
 
@@ -491,6 +528,25 @@ _probe_blocklist: Dict[str, float] = {}
 # lock for concurrency safety
 _probe_lock = asyncio.Lock()
 _persistent_bans: Dict[str, Dict[str, Any]] = {}
+
+# Whitelist structures
+_ip_whitelist_ips: set[str] = set()
+_ip_whitelist_nets: list = []
+
+def _is_whitelisted(ip: str) -> bool:
+    try:
+        if ip in _ip_whitelist_ips:
+            return True
+        ip_obj = ipaddress.ip_address(ip)
+        for net in _ip_whitelist_nets:
+            try:
+                if ip_obj in net:
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
 
 
 def _atomic_write_json(path: PathLib, data: object) -> None:
@@ -574,10 +630,11 @@ _sensitive_threshold = int(os.getenv("SENSITIVE_THRESHOLD", "3"))
 async def log_requests(request: Request, call_next):
     start_time = datetime.now()
     client_ip = request.client.host if request.client else "unknown"
-    # If IP is currently blocked, short-circuit with 403 and log
+    wl = _is_whitelisted(client_ip)
+    # If IP is currently blocked, short-circuit with 403 and log (unless whitelisted)
     now_ts = datetime.now().timestamp()
     blocked_until = _probe_blocklist.get(client_ip)
-    if blocked_until and blocked_until > now_ts:
+    if not wl and blocked_until and blocked_until > now_ts:
         # Immediate short-circuit response for blocked IPs
         # Emit a fail2ban-friendly marker so external tools see repeated-block events
         try:
@@ -608,6 +665,7 @@ async def log_requests(request: Request, call_next):
     # Pull an optional short auth note from the request (set by auth dependencies)
     auth_note = getattr(request.state, "auth_note", None)
     note_suffix = f" - [{auth_note}]" if auth_note and auth_note != "OK" else ""
+    wl_suffix = " - [WHITELIST]" if wl else ""
 
     # Build the concise message. Format required:
     # [timestamp] - <IP> - [LEVEL_LABEL] <status> <METHOD> <PATH> - <AUTH_NOTE>
@@ -626,8 +684,8 @@ async def log_requests(request: Request, call_next):
         ua_suffix = ""
 
     # Prepare two message variants: console (no UA) and file (with UA)
-    console_msg_base = f"{client_ip} - [{{}}] - {status_code} {method} {url_path}{note_suffix}{qs_suffix}"
-    file_msg_base = f"{client_ip} - [{{}}] - {status_code} {method} {url_path}{note_suffix}{qs_suffix}{ua_suffix}"
+    console_msg_base = f"{client_ip} - [{{}}] - {status_code} {method} {url_path}{note_suffix}{qs_suffix}{wl_suffix}"
+    file_msg_base = f"{client_ip} - [{{}}] - {status_code} {method} {url_path}{note_suffix}{qs_suffix}{ua_suffix}{wl_suffix}"
 
     if status_code >= 500:
         level_label = 'ERROR'
@@ -649,7 +707,10 @@ async def log_requests(request: Request, call_next):
         # Track repeated 404/4xx probes and temporarily block if threshold exceeded
         try:
             async with _probe_lock:
-                if status_code == 404:
+                if wl:
+                    # Do not track or ban whitelisted IPs
+                    pass
+                elif status_code == 404:
                     dq = _probe_404_counters[client_ip]
                     now_ts = datetime.now().timestamp()
                     # Emit a machine-parseable marker that fail2ban can watch for

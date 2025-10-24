@@ -18,8 +18,9 @@ mongo-data/
 logs/
 *.log
 
-# Local persistent ban list (app-managed)
+# Local persistent state (app-managed)
 deployment/banned_ips.json
+deployment/whitelist_ips.json
 
 # IDE/editor settings
 .idea/
