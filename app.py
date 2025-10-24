@@ -554,6 +554,9 @@ app = FastAPI(
     ),
     openapi_tags=tags_metadata,
     lifespan=lifespan,
+    docs_url=None,  # Disable default docs
+    redoc_url=None,  # Disable redoc
+    openapi_url=None,  # Disable default openapi.json
 )
 
 # Simple in-process tracker for repeated 404 probes and a temporary blocklist.
