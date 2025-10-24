@@ -391,6 +391,8 @@ def _filter_schema_by_roles(schema: Dict[str, Any], include_admin: bool, include
     filtered = copy.deepcopy(schema)
     paths = filtered.get("paths", {})
     new_paths = {}
+    used_schemas = set()
+    
     for path, ops in paths.items():
         new_ops = {}
         for method, op in ops.items():
@@ -402,6 +404,8 @@ def _filter_schema_by_roles(schema: Dict[str, Any], include_admin: bool, include
             if public_only:
                 if "Health" in tags:
                     new_ops[method] = op
+                    # Track schemas used by this operation
+                    _collect_schema_refs(op, used_schemas)
             else:
                 # Filter admin
                 if not include_admin and "Admin" in tags:
@@ -411,10 +415,50 @@ def _filter_schema_by_roles(schema: Dict[str, Any], include_admin: bool, include
                     continue
                 # Otherwise include
                 new_ops[method] = op
+                _collect_schema_refs(op, used_schemas)
         if new_ops:
             new_paths[path] = new_ops
+    
     filtered["paths"] = new_paths
+    
+    # Filter components/schemas to only include used ones
+    if "components" in filtered and "schemas" in filtered["components"]:
+        all_schemas = filtered["components"]["schemas"]
+        filtered_schemas = {}
+        # Recursively collect all referenced schemas
+        to_process = list(used_schemas)
+        processed = set()
+        while to_process:
+            schema_name = to_process.pop()
+            if schema_name in processed or schema_name not in all_schemas:
+                continue
+            processed.add(schema_name)
+            filtered_schemas[schema_name] = all_schemas[schema_name]
+            # Find references within this schema
+            _collect_schema_refs(all_schemas[schema_name], to_process)
+        
+        filtered["components"]["schemas"] = filtered_schemas
+    
     return filtered
+
+
+def _collect_schema_refs(obj: Any, refs: Any) -> None:
+    """Recursively collect $ref schema names from an object."""
+    if isinstance(obj, dict):
+        if "$ref" in obj:
+            ref = obj["$ref"]
+            # Extract schema name from "#/components/schemas/SchemaName"
+            if ref.startswith("#/components/schemas/"):
+                schema_name = ref.split("/")[-1]
+                if isinstance(refs, set):
+                    refs.add(schema_name)
+                elif isinstance(refs, list):
+                    refs.append(schema_name)
+        for value in obj.values():
+            _collect_schema_refs(value, refs)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_schema_refs(item, refs)
 
 
 @asynccontextmanager
@@ -1138,17 +1182,32 @@ def docs_general(token: str = Depends(verify_bearer_token_general)):
 
 @app.get("/docs", include_in_schema=False)
 def docs_public(request: Request):
-    """Smart docs endpoint that auto-redirects based on token role."""
+    """Smart docs endpoint that serves role-specific schema based on token."""
     role = _detect_token_role(request)
     if role == "admin":
-        return RedirectResponse(url="/docs/admin")
+        return get_swagger_ui_html(
+            openapi_url="/openapi/admin.json",
+            title="Admin API Docs",
+            swagger_ui_parameters={"persistAuthorization": True}
+        )
     elif role == "flxtime":
-        return RedirectResponse(url="/docs/flxtime")
+        return get_swagger_ui_html(
+            openapi_url="/openapi/flxtime.json",
+            title="FlxTime API Docs",
+            swagger_ui_parameters={"persistAuthorization": True}
+        )
     elif role == "general":
-        return RedirectResponse(url="/docs/general")
+        return get_swagger_ui_html(
+            openapi_url="/openapi/general.json",
+            title="General API Docs",
+            swagger_ui_parameters={"persistAuthorization": True}
+        )
     else:
         # Public view
-        return get_swagger_ui_html(openapi_url="/openapi/public.json", title="Public API Docs")
+        return get_swagger_ui_html(
+            openapi_url="/openapi/public.json",
+            title="Public API Docs"
+        )
 
 
 
