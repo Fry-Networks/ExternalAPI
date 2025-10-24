@@ -940,6 +940,37 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # ty
 def _root_redirect():
     return RedirectResponse(url="/docs")
 
+
+def _detect_token_role(request: Request) -> str:
+    """Detect what role a request has based on Authorization header.
+    
+    Returns 'admin', 'flxtime', 'general', or 'public'.
+    """
+    try:
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return "public"
+        token = auth_header[7:].strip()
+        
+        admin_token = os.getenv("API_BEARER_TOKEN_ADMIN")
+        flxtime_token = os.getenv("API_BEARER_TOKEN_FLXTIME")
+        general_token = os.getenv("API_BEARER_TOKEN")
+        
+        # Check admin first (highest privilege)
+        if admin_token and token == admin_token:
+            return "admin"
+        # Check FlxTime
+        if flxtime_token and token == flxtime_token:
+            return "flxtime"
+        # Check general (fallback for FlxTime if needed)
+        if general_token and token == general_token:
+            # General token can access FlxTime endpoints too
+            return "general"
+        
+        return "public"
+    except Exception:
+        return "public"
+
 # Inject human-readable enum descriptions for MinerCode into the OpenAPI schema.
 # This uses a vendor extension `x-enum-descriptions` which Swagger UI will render
 # in the schema details. We also set an example for endpoints that reference
@@ -1102,8 +1133,18 @@ def docs_general(token: str = Depends(verify_bearer_token_general)):
 
 
 @app.get("/docs", include_in_schema=False)
-def docs_public():
-    return get_swagger_ui_html(openapi_url="/openapi/public.json", title="Public API Docs")
+def docs_public(request: Request):
+    """Smart docs endpoint that auto-redirects based on token role."""
+    role = _detect_token_role(request)
+    if role == "admin":
+        return RedirectResponse(url="/docs/admin")
+    elif role == "flxtime":
+        return RedirectResponse(url="/docs/flxtime")
+    elif role == "general":
+        return RedirectResponse(url="/docs/general")
+    else:
+        # Public view
+        return get_swagger_ui_html(openapi_url="/openapi/public.json", title="Public API Docs")
 
 
 
