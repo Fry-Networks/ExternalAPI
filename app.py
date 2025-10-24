@@ -604,6 +604,84 @@ def _persist_remove_ban(ip: str) -> bool:
     except Exception:
         logging.getLogger("ExternalAPI.file").exception("failed to persist removed ban for %s", ip)
         return False
+# Whitelist persistence helpers
+def _whitelist_file() -> PathLib:
+    return PathLib("deployment/whitelist_ips.json")
+
+
+def _persist_whitelist_list() -> list[str]:
+    try:
+        import json
+        wf = _whitelist_file()
+        if wf.exists():
+            data = json.loads(wf.read_text(encoding="utf-8")) or []
+            return [x for x in data if isinstance(x, str)]
+    except Exception:
+        logging.getLogger("ExternalAPI.file").debug("failed reading whitelist file")
+    return []
+
+
+def _persist_whitelist_write(entries: list[str]) -> None:
+    # Atomic write
+    _atomic_write_json(_whitelist_file(), entries)
+
+
+def _normalize_wl_entry(entry: str) -> tuple[str, str]:
+    """Return (kind, normalized_string) where kind is 'ip' or 'cidr'. Raises on invalid."""
+    entry = entry.strip()
+    if "/" in entry:
+        net = ipaddress.ip_network(entry, strict=False)
+        return ("cidr", str(net))
+    else:
+        ip_str = str(ipaddress.ip_address(entry))
+        return ("ip", ip_str)
+
+
+def _whitelist_add(entry: str) -> dict:
+    kind, norm = _normalize_wl_entry(entry)
+    # Update memory
+    if kind == "ip":
+        _ip_whitelist_ips.add(norm)
+        # Also remove any existing bans for this IP
+        if norm in _probe_blocklist:
+            _probe_blocklist.pop(norm, None)
+        _persist_remove_ban(norm)
+    else:
+        _ip_whitelist_nets.append(ipaddress.ip_network(norm, strict=False))
+        # Remove pre-existing bans within this net (best-effort)
+        for ip in list(_probe_blocklist.keys()):
+            try:
+                if ipaddress.ip_address(ip) in _ip_whitelist_nets[-1]:
+                    _probe_blocklist.pop(ip, None)
+                    _persist_remove_ban(ip)
+            except Exception:
+                continue
+    # Update file list idempotently
+    items = _persist_whitelist_list()
+    if norm not in items:
+        items.append(norm)
+        _persist_whitelist_write(items)
+    logging.getLogger("ExternalAPI.file").warning(f"WHITELIST_ADDED {kind}={norm}")
+    return {"kind": kind, "value": norm}
+
+
+def _whitelist_remove(entry: str) -> dict:
+    kind, norm = _normalize_wl_entry(entry)
+    # Update memory
+    if kind == "ip":
+        _ip_whitelist_ips.discard(norm)
+    else:
+        # remove all nets equal to norm
+        target = ipaddress.ip_network(norm, strict=False)
+        _ip_whitelist_nets[:] = [n for n in _ip_whitelist_nets if n != target]
+    # Update file list
+    items = _persist_whitelist_list()
+    if norm in items:
+        items = [x for x in items if x != norm]
+        _persist_whitelist_write(items)
+        logging.getLogger("ExternalAPI.file").warning(f"WHITELIST_REMOVED {kind}={norm}")
+        return {"removed": True, "kind": kind, "value": norm}
+    return {"removed": False, "kind": kind, "value": norm}
 
 # Sensitive filenames that indicate probing for config files or secrets.
 # If repeated within a short window, we will immediately block the offender.
@@ -881,6 +959,45 @@ def unblock_ip(payload: Dict[str, str], token: str = Depends(verify_bearer_token
         except Exception:
             logging.getLogger("ExternalAPI.file").warning("FAILED_PROBE_UNBLOCK ip=%s", ip)
     return {"unblocked": removed}
+
+
+# Whitelist admin endpoints (hidden from OpenAPI by default)
+@app.get("/admin/whitelist", tags=["Admin"], summary="List whitelisted entries", include_in_schema=False)
+def admin_whitelist_list(token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
+    """List effective whitelist entries. Returns normalized IPs and CIDRs."""
+    ips = sorted(list(_ip_whitelist_ips))
+    cidrs = sorted([str(n) for n in _ip_whitelist_nets])
+    # Also include what's in the file for visibility
+    file_list = _persist_whitelist_list()
+    return {"ips": ips, "cidrs": cidrs, "file": file_list}
+
+
+@app.post("/admin/whitelist", tags=["Admin"], summary="Add whitelist entry", include_in_schema=False)
+def admin_whitelist_add(payload: Dict[str, str], token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
+    entry = (payload or {}).get("entry")
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing 'entry' in payload")
+    try:
+        result = _whitelist_add(entry)
+        return {"ok": True, **result}
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid IP or CIDR")
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to add whitelist entry")
+
+
+@app.post("/admin/whitelist/remove", tags=["Admin"], summary="Remove whitelist entry", include_in_schema=False)
+def admin_whitelist_remove(payload: Dict[str, str], token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
+    entry = (payload or {}).get("entry")
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing 'entry' in payload")
+    try:
+        result = _whitelist_remove(entry)
+        return {"ok": True, **result}
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid IP or CIDR")
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to remove whitelist entry")
 
 
 @app.get("/health", tags=["Health"], summary="Health check")
