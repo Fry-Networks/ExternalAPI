@@ -67,7 +67,7 @@ for k, v in list(os.environ.items()):
         os.environ[k] = _fetch_op_secret(v)
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Path, Request, status
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from fastapi.openapi.utils import get_openapi
@@ -1167,47 +1167,110 @@ def openapi_public():
 # Role-based Swagger UI endpoints (protected)
 @app.get("/docs/admin", include_in_schema=False)
 def docs_admin(token: str = Depends(verify_bearer_token_admin)):
-    return get_swagger_ui_html(openapi_url="/openapi/admin.json", title="Admin API Docs")
+    return get_swagger_ui_html(
+        openapi_url="/openapi/admin.json",
+        title="Admin API Docs",
+        swagger_ui_parameters={"persistAuthorization": True}
+    )
 
 
 @app.get("/docs/flxtime", include_in_schema=False)
 def docs_flxtime(token: str = Depends(verify_bearer_token_flxtime)):
-    return get_swagger_ui_html(openapi_url="/openapi/flxtime.json", title="FlxTime API Docs")
+    return get_swagger_ui_html(
+        openapi_url="/openapi/flxtime.json",
+        title="FlxTime API Docs",
+        swagger_ui_parameters={"persistAuthorization": True}
+    )
 
 
 @app.get("/docs/general", include_in_schema=False)
 def docs_general(token: str = Depends(verify_bearer_token_general)):
-    return get_swagger_ui_html(openapi_url="/openapi/general.json", title="General API Docs")
+    return get_swagger_ui_html(
+        openapi_url="/openapi/general.json",
+        title="General API Docs",
+        swagger_ui_parameters={"persistAuthorization": True}
+    )
 
 
 @app.get("/docs", include_in_schema=False)
 def docs_public(request: Request):
     """Smart docs endpoint that serves role-specific schema based on token."""
+    # Return custom HTML that checks for stored token and loads appropriate schema
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>API Documentation</title>
+        <script>
+            // Check for stored bearer token in localStorage (Swagger UI stores it there)
+            function getStoredToken() {
+                try {
+                    const auth = localStorage.getItem('authorized');
+                    if (auth) {
+                        const authData = JSON.parse(auth);
+                        if (authData && authData.bearer && authData.bearer.value) {
+                            return authData.bearer.value;
+                        }
+                    }
+                } catch (e) {
+                    console.log('No stored token found');
+                }
+                return null;
+            }
+            
+            // Detect which schema to load based on token
+            const token = getStoredToken();
+            let schemaUrl = '/openapi/public.json';
+            
+            if (token) {
+                // Make a quick request to detect role
+                fetch('/api/detect-role', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.role === 'admin') {
+                        window.location.href = '/docs/admin';
+                    } else if (data.role === 'flxtime') {
+                        window.location.href = '/docs/flxtime';
+                    } else if (data.role === 'general') {
+                        window.location.href = '/docs/general';
+                    } else {
+                        window.location.href = '/docs/public';
+                    }
+                })
+                .catch(() => {
+                    // Fallback to public
+                    window.location.href = '/docs/public';
+                });
+            } else {
+                // No token, show public docs
+                window.location.href = '/docs/public';
+            }
+        </script>
+    </head>
+    <body>
+        <p>Loading documentation...</p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/docs/public", include_in_schema=False)
+def docs_public_direct():
+    """Public docs without auth."""
+    return get_swagger_ui_html(
+        openapi_url="/openapi/public.json",
+        title="Public API Docs"
+    )
+
+
+@app.get("/api/detect-role", include_in_schema=False)
+def detect_role_endpoint(request: Request):
+    """Helper endpoint to detect token role."""
     role = _detect_token_role(request)
-    if role == "admin":
-        return get_swagger_ui_html(
-            openapi_url="/openapi/admin.json",
-            title="Admin API Docs",
-            swagger_ui_parameters={"persistAuthorization": True}
-        )
-    elif role == "flxtime":
-        return get_swagger_ui_html(
-            openapi_url="/openapi/flxtime.json",
-            title="FlxTime API Docs",
-            swagger_ui_parameters={"persistAuthorization": True}
-        )
-    elif role == "general":
-        return get_swagger_ui_html(
-            openapi_url="/openapi/general.json",
-            title="General API Docs",
-            swagger_ui_parameters={"persistAuthorization": True}
-        )
-    else:
-        # Public view
-        return get_swagger_ui_html(
-            openapi_url="/openapi/public.json",
-            title="Public API Docs"
-        )
+    return {"role": role}
 
 
 
