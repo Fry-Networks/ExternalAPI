@@ -181,17 +181,22 @@ The FlxTime API endpoint is rate limited to **100 requests per minute per IP add
    - Rotate tokens periodically (contact FryNetworks for rotation)
 8. **Caching:** Cache successful lookups to reduce API calls
 
-## Interactive Documentation
+## Interactive Documentation & Role-Based Access
 
-You can explore and test the API interactively at:
+The interactive API documentation (`/docs`) is only available after authentication. As a FlxTime partner, your token grants access to FlxTime-specific endpoint.
 
-**Swagger UI:** [https://hardwareapi.frynetworks.com/docs](https://hardwareapi.frynetworks.com/docs)
+- **FlxTime tokens:** Only FlxTime endpoint (e.g., `/credentials/{miner_key}/exists`)
+- **Public (unauthenticated):** No endpoints or schemas are visible
 
-1. Click the "Authorize" button (🔒 lock icon) at the top
-2. Enter your bearer token in the format: `YOUR_FLXTIME_TOKEN` (without "Bearer" prefix)
-3. Click "Authorize" and then "Close"
-4. Navigate to the `/credentials/{miner_key}/exists` endpoint
-5. Click "Try it out", enter a miner key, and click "Execute"
+**How to use:**
+1. Go to [https://hardwareapi.frynetworks.com/docs](https://hardwareapi.frynetworks.com/docs)
+2. Click the "Authorize" button (🔒 lock icon) at the top
+3. Enter your bearer token (just the token, no "Bearer" prefix)
+4. Click "Authorize" and then "Close"
+5. The docs will instantly update to show only FlxTime endpoint
+6. Navigate to `/credentials/{miner_key}/exists` and use "Try it out" as needed
+
+**Note:** If you log out or change tokens, the docs will automatically update and redirect as needed.
 
 ## Support
 
@@ -199,15 +204,10 @@ For technical support, API issues, or token rotation requests:
 
 - **Email:** dude350z@frynetworks.com / helpdesk@frynetworks.com
 
-## Changelog
+## Security & Rate Limiting
 
-### v1.0.0 (October 2025)
-- Initial FlxTime API endpoint release
-- Added `/credentials/{miner_key}/exists` endpoint with bearer token authentication
-- Implemented rate limiting: 100 requests per minute per IP address
-- Added rate limit headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+- **Scanner Mitigation:** Excessive 404s (e.g., probing) trigger permanent auto-ban for the offending IP. Bans are persistent and managed by admins.
+- **Rate Limiting:** 100 requests/minute per IP. See headers and error handling above.
 
----
-
-**Last Updated:** October 22, 2025  
-**API Version:** 1.0.0
+**Last Updated:** October 25, 2025  
+**API Version:** 2.1.0
