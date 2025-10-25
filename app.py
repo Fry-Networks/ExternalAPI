@@ -386,7 +386,13 @@ def _build_full_openapi(app: FastAPI):
     )
 
 
-def _filter_schema_by_roles(schema: Dict[str, Any], include_admin: bool, include_flxtime: bool, public_only: bool = False) -> Dict[str, Any]:
+def _filter_schema_by_roles(
+    schema: Dict[str, Any],
+    include_admin: bool,
+    include_flxtime: bool,
+    public_only: bool = False,
+    allowed_tags: set[str] | None = None,
+) -> Dict[str, Any]:
     import copy
     filtered = copy.deepcopy(schema)
     paths = filtered.get("paths", {})
@@ -400,11 +406,14 @@ def _filter_schema_by_roles(schema: Dict[str, Any], include_admin: bool, include
                 new_ops[method] = op
                 continue
             tags = op.get("tags", [])
-            # Public only: include only Health tag
+            # Public-only or explicit allow-list: include only allowed tags
             if public_only:
                 if "Health" in tags:
                     new_ops[method] = op
-                    # Track schemas used by this operation
+                    _collect_schema_refs(op, used_schemas)
+            elif allowed_tags is not None:
+                if any(t in allowed_tags for t in tags):
+                    new_ops[method] = op
                     _collect_schema_refs(op, used_schemas)
             else:
                 # Filter admin
@@ -487,11 +496,23 @@ async def lifespan(app: FastAPI):
         # Build and cache a base OpenAPI (will be further filtered per role routes)
         global _openapi_full, _openapi_admin, _openapi_flxtime, _openapi_general, _openapi_public
         _openapi_full = _build_full_openapi(app)
-        # Derive role-based variants
-        _openapi_admin = _openapi_full
-        _openapi_flxtime = _filter_schema_by_roles(_openapi_full, include_admin=False, include_flxtime=True)
-        _openapi_general = _filter_schema_by_roles(_openapi_full, include_admin=False, include_flxtime=True)
-        _openapi_public = _filter_schema_by_roles(_openapi_full, include_admin=False, include_flxtime=False, public_only=True)
+        # Derive role-based variants per requirements:
+        # - Admin: Admin + Health only
+        _openapi_admin = _filter_schema_by_roles(
+            _openapi_full, include_admin=True, include_flxtime=True, allowed_tags={"Admin", "Health"}
+        )
+        # - FlxTime: FlxTime + Health only
+        _openapi_flxtime = _filter_schema_by_roles(
+            _openapi_full, include_admin=False, include_flxtime=True, allowed_tags={"FlxTime", "Health"}
+        )
+        # - General: everything except Admin (includes FlxTime and all general tags)
+        _openapi_general = _filter_schema_by_roles(
+            _openapi_full, include_admin=False, include_flxtime=True
+        )
+        # - Public: Health only
+        _openapi_public = _filter_schema_by_roles(
+            _openapi_full, include_admin=False, include_flxtime=False, public_only=True
+        )
     except Exception:
         # Non-fatal; continue startup even if we couldn't augment OpenAPI
         pass
