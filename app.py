@@ -1237,60 +1237,72 @@ def _swagger_ui_html_with_auth(openapi_url: str, title: str, current_role: str) 
           return null;
         }}
 
-                // Check role and redirect if needed; poll continuously to detect auth changes
-                function checkAndRedirectRole() {{
-                    const t = findBearerToken();
+                // On-demand role detection (no polling). Trigger when token changes.
+                let __lastToken = null;
+                let __authDebounce = null;
+
+                function roleRedirectIfNeeded(token) {{
                     const currentRole = '{current_role}';
-          
-                    if (!t && currentRole !== 'public') {{
-                        // Token removed (logged out), redirect to public
-                        window.location.replace('/docs/public');
-                        return;
-          }}
-          
-                    if (t) {{
-                        fetch('/api/detect-role', {{ headers: {{ 'Authorization': 'Bearer ' + t }} }})
-                            .then(r => r.ok ? r.json() : {{ role: 'public' }})
-                            .then(data => {{
-                                const detectedRole = (data && data.role) || 'public';
-                                if (detectedRole !== currentRole) {{
-                                    const roleMap = {{
-                                        admin: '/docs/admin',
-                                        flxtime: '/docs/flxtime',
-                                        general: '/docs/general',
-                                        public: '/docs/public'
-                                    }};
-                                    const targetPath = roleMap[detectedRole] || '/docs/public';
-                                    if (window.location.pathname !== targetPath) {{
-                                        window.location.replace(targetPath);
-                                        return;
-                                    }}
-                                }}
-                                // Correct page for this role, initialize Swagger UI once
-                                if (!window.swaggerUIInitialized) {{
-                                    initSwaggerUI(t);
-                                    window.swaggerUIInitialized = true;
-                                }}
-                            }})
-                            .catch(() => {{
-                                if (!window.swaggerUIInitialized) {{
-                                    initSwaggerUI(t);
-                                    window.swaggerUIInitialized = true;
-                                }}
-                            }});
-                    }} else {{
-                        // No token, ensure we're on public and init once
-                        if (!window.swaggerUIInitialized) {{
+                    if (!token) {{
+                        if (currentRole !== 'public') {{
+                            window.location.replace('/docs/public');
+                        }} else if (!window.swaggerUIInitialized) {{
                             initSwaggerUI(null);
                             window.swaggerUIInitialized = true;
                         }}
+                        return;
                     }}
+                    fetch('/api/detect-role', {{ headers: {{ 'Authorization': 'Bearer ' + token }} }})
+                        .then(r => r.ok ? r.json() : {{ role: 'public' }})
+                        .then(data => {{
+                            const detectedRole = (data && data.role) || 'public';
+                            const roleMap = {{ admin: '/docs/admin', flxtime: '/docs/flxtime', general: '/docs/general', public: '/docs/public' }};
+                            const targetPath = roleMap[detectedRole] || '/docs/public';
+                            if (detectedRole !== currentRole && window.location.pathname !== targetPath) {{
+                                window.location.replace(targetPath);
+                                return;
+                            }}
+                            if (!window.swaggerUIInitialized) {{
+                                initSwaggerUI(token);
+                                window.swaggerUIInitialized = true;
+                            }}
+                        }})
+                        .catch(() => {{
+                            if (!window.swaggerUIInitialized) {{
+                                initSwaggerUI(token);
+                                window.swaggerUIInitialized = true;
+                            }}
+                        }});
                 }}
 
-                // Check immediately on load and poll every 2 seconds for auth changes
+                function scheduleAuthCheck() {{
+                    if (__authDebounce) clearTimeout(__authDebounce);
+                    __authDebounce = setTimeout(() => {{
+                        const t = findBearerToken();
+                        if (t !== __lastToken) {{
+                            __lastToken = t;
+                            roleRedirectIfNeeded(t);
+                        }}
+                    }}, 150);
+                }}
+
+                // Monkey-patch localStorage to detect token writes/removals (login/logout)
+                (function() {{
+                    try {{
+                        const _set = localStorage.setItem.bind(localStorage);
+                        localStorage.setItem = function(k, v) {{ const r = _set(k, v); scheduleAuthCheck(); return r; }};
+                        const _remove = localStorage.removeItem.bind(localStorage);
+                        localStorage.removeItem = function(k) {{ const r = _remove(k); scheduleAuthCheck(); return r; }};
+                    }} catch (e) {{ /* ignore */ }}
+                }})();
+
+                // Also listen for cross-tab changes
+                window.addEventListener('storage', scheduleAuthCheck);
+
+                // Initial check once on load (no polling afterwards)
                 window.onload = function() {{
-                    checkAndRedirectRole();
-                    setInterval(checkAndRedirectRole, 2000);
+                    __lastToken = findBearerToken();
+                    roleRedirectIfNeeded(__lastToken);
                 }}
 
         function initSwaggerUI(token) {{
