@@ -1143,6 +1143,13 @@ def health() -> Dict[str, Any]:
     }
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Return 204 No Content for favicon to avoid log noise."""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
 # Role-based OpenAPI JSON endpoints (protected)
 @app.get("/openapi/admin.json", include_in_schema=False)
 def openapi_admin(token: str = Depends(verify_bearer_token_admin)):
@@ -1164,31 +1171,160 @@ def openapi_public():
     return JSONResponse(_openapi_public)
 
 
-# Role-based Swagger UI endpoints (protected)
+def _swagger_ui_html_with_auth(openapi_url: str, title: str, current_role: str) -> HTMLResponse:
+    """Serve a Swagger UI that automatically attaches Authorization header
+    from localStorage for ALL requests (including fetching the OpenAPI JSON).
+
+    This makes role-specific docs work without protecting the docs HTML route
+    itself, while still protecting the OpenAPI JSON endpoints.
+    
+    Auto-redirects to the correct role-specific docs page if a token is found
+    that grants access to a different role.
+    """
+    html = fr"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <title>{title}</title>
+      <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist/swagger-ui.css" />
+      <style>
+        html {{ box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }}
+        *, *:before, *:after {{ box-sizing: inherit; }}
+        body {{ margin:0; background: #fafafa; }}
+      </style>
+    </head>
+    <body>
+      <div id="swagger-ui"></div>
+      <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist/swagger-ui-bundle.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist/swagger-ui-standalone-preset.js"></script>
+      <script>
+        function findBearerToken() {{
+          try {{
+            const keys = Object.keys(localStorage);
+            for (const k of keys) {{
+              const raw = localStorage.getItem(k);
+              if (!raw) continue;
+              try {{
+                const obj = JSON.parse(raw);
+                if (obj && typeof obj === 'object' && obj.authorized && typeof obj.authorized === 'object') {{
+                  for (const v of Object.values(obj.authorized)) {{
+                    if (v && typeof v === 'object' && 'value' in v) {{
+                      const token = (v.value || '').toString();
+                      if (token) return token.replace(/^Bearer\s+/i, '');
+                    }}
+                  }}
+                }}
+                const schemes = ['HTTPBearer', 'bearerAuth', 'Bearer', 'Authorization', 'bearer'];
+                for (const s of schemes) {{
+                  if (obj[s] && typeof obj[s] === 'object' && obj[s].value) {{
+                    const token = (obj[s].value || '').toString();
+                    if (token) return token.replace(/^Bearer\s+/i, '');
+                  }}
+                }}
+                if (obj.bearer && obj.bearer.value) {{
+                  const token = (obj.bearer.value || '').toString();
+                  if (token) return token.replace(/^Bearer\s+/i, '');
+                }}
+              }} catch (e) {{
+                if (typeof raw === 'string' && raw.length > 20) {{
+                  const m = raw.match(/Bearer\s+([A-Za-z0-9-_\.+=]+)/);
+                  if (m && m[1]) return m[1];
+                }}
+              }}
+            }}
+          }} catch (e) {{}}
+          return null;
+        }}
+
+        window.onload = function() {{
+          // If a token exists and grants a different role, auto-redirect to that role's docs
+          const t = findBearerToken();
+          if (t) {{
+            fetch('/api/detect-role', {{ headers: {{ 'Authorization': 'Bearer ' + t }} }})
+              .then(r => r.ok ? r.json() : {{ role: 'public' }})
+              .then(data => {{
+                const detectedRole = (data && data.role) || 'public';
+                const currentRole = '{current_role}';
+                if (detectedRole !== currentRole) {{
+                  const roleMap = {{
+                    admin: '/docs/admin',
+                    flxtime: '/docs/flxtime',
+                    general: '/docs/general',
+                    public: '/docs/public'
+                  }};
+                  const targetPath = roleMap[detectedRole] || '/docs/public';
+                  if (window.location.pathname !== targetPath) {{
+                    window.location.replace(targetPath);
+                    return;
+                  }}
+                }}
+                // Correct page for this role, initialize Swagger UI
+                initSwaggerUI(t);
+              }})
+              .catch(() => {{
+                // Network error, just init UI anyway
+                initSwaggerUI(t);
+              }});
+          }} else {{
+            // No token, init UI on current page
+            initSwaggerUI(null);
+          }}
+        }}
+
+        function initSwaggerUI(token) {{
+          const ui = SwaggerUIBundle({{
+            url: '{openapi_url}',
+            dom_id: '#swagger-ui',
+            deepLinking: true,
+            presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+            layout: 'BaseLayout',
+            persistAuthorization: true,
+            requestInterceptor: function(req) {{
+              const t = token || findBearerToken();
+              if (t) {{ req.headers['Authorization'] = 'Bearer ' + t; }}
+              return req;
+            }}
+          }});
+
+          // Attempt to preauthorize common scheme names so the UI shows as authorized
+          if (token && ui && ui.preauthorizeApiKey) {{
+            const bearerValue = 'Bearer ' + token;
+            const schemes = ['HTTPBearer', 'bearerAuth', 'Bearer'];
+            for (const s of schemes) {{
+              try {{ ui.preauthorizeApiKey(s, bearerValue); }} catch (e) {{}}
+            }}
+          }}
+        }}
+      </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
 @app.get("/docs/admin", include_in_schema=False)
-def docs_admin(token: str = Depends(verify_bearer_token_admin)):
-    return get_swagger_ui_html(
+def docs_admin():
+    return _swagger_ui_html_with_auth(
         openapi_url="/openapi/admin.json",
         title="Admin API Docs",
-        swagger_ui_parameters={"persistAuthorization": True}
+        current_role="admin"
     )
 
 
 @app.get("/docs/flxtime", include_in_schema=False)
-def docs_flxtime(token: str = Depends(verify_bearer_token_flxtime)):
-    return get_swagger_ui_html(
+def docs_flxtime():
+    return _swagger_ui_html_with_auth(
         openapi_url="/openapi/flxtime.json",
         title="FlxTime API Docs",
-        swagger_ui_parameters={"persistAuthorization": True}
+        current_role="flxtime"
     )
 
 
 @app.get("/docs/general", include_in_schema=False)
-def docs_general(token: str = Depends(verify_bearer_token_general)):
-    return get_swagger_ui_html(
+def docs_general():
+    return _swagger_ui_html_with_auth(
         openapi_url="/openapi/general.json",
         title="General API Docs",
-        swagger_ui_parameters={"persistAuthorization": True}
+        current_role="general"
     )
 
 
@@ -1196,57 +1332,91 @@ def docs_general(token: str = Depends(verify_bearer_token_general)):
 def docs_public(request: Request):
     """Smart docs endpoint that serves role-specific schema based on token."""
     # Return custom HTML that checks for stored token and loads appropriate schema
-    html_content = """
+    html_content = r"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>API Documentation</title>
         <script>
-            // Check for stored bearer token in localStorage (Swagger UI stores it there)
-            function getStoredToken() {
+            // Attempt to locate a persisted Swagger UI bearer token across common storage keys
+            function findBearerTokenInLocalStorage() {
                 try {
-                    const auth = localStorage.getItem('authorized');
-                    if (auth) {
-                        const authData = JSON.parse(auth);
-                        if (authData && authData.bearer && authData.bearer.value) {
-                            return authData.bearer.value;
+                    const keys = Object.keys(localStorage);
+                    for (const k of keys) {
+                        const raw = localStorage.getItem(k);
+                        if (!raw) continue;
+                        // Try JSON parse; many swagger plugins store JSON structures
+                        try {
+                            const obj = JSON.parse(raw);
+                            // 1) swagger-ui authorized map pattern: obj.authorized.{scheme}.value
+                            if (obj && typeof obj === 'object' && obj.authorized && typeof obj.authorized === 'object') {
+                                for (const v of Object.values(obj.authorized)) {
+                                    if (v && typeof v === 'object' && 'value' in v) {
+                                        const token = (v.value || '').toString();
+                                        if (token) return token.replace(/^Bearer\s+/i, '');
+                                    }
+                                }
+                            }
+                            // 2) direct scheme name buckets (bearerAuth/Bearer/etc)
+                            const schemes = ['bearerAuth', 'Bearer', 'http', 'HTTP', 'Authorization', 'bearer'];
+                            for (const s of schemes) {
+                                if (obj[s] && typeof obj[s] === 'object' && obj[s].value) {
+                                    const token = (obj[s].value || '').toString();
+                                    if (token) return token.replace(/^Bearer\s+/i, '');
+                                }
+                            }
+                            // 3) some plugins store a flat { bearer: { value } }
+                            if (obj.bearer && obj.bearer.value) {
+                                const token = (obj.bearer.value || '').toString();
+                                if (token) return token.replace(/^Bearer\s+/i, '');
+                            }
+                        } catch (e) {
+                            // Not JSON; try to heuristically extract a token-like string
+                            if (typeof raw === 'string' && raw.length > 20) {
+                                const m = raw.match(/Bearer\s+([A-Za-z0-9-_\.=]+)/);
+                                if (m && m[1]) return m[1];
+                            }
                         }
                     }
                 } catch (e) {
-                    console.log('No stored token found');
+                    // ignore
                 }
                 return null;
             }
-            
-            // Detect which schema to load based on token
-            const token = getStoredToken();
-            let schemaUrl = '/openapi/public.json';
-            
-            if (token) {
-                // Make a quick request to detect role
-                fetch('/api/detect-role', {
-                    headers: { 'Authorization': 'Bearer ' + token }
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.role === 'admin') {
-                        window.location.href = '/docs/admin';
-                    } else if (data.role === 'flxtime') {
-                        window.location.href = '/docs/flxtime';
-                    } else if (data.role === 'general') {
-                        window.location.href = '/docs/general';
-                    } else {
-                        window.location.href = '/docs/public';
-                    }
-                })
-                .catch(() => {
-                    // Fallback to public
-                    window.location.href = '/docs/public';
-                });
-            } else {
-                // No token, show public docs
-                window.location.href = '/docs/public';
+
+            // Also allow passing ?token=... for manual override
+            function getTokenFromQuery() {
+                try {
+                    const params = new URLSearchParams(window.location.search);
+                    const t = params.get('token');
+                    return t && t.trim() ? t.trim() : null;
+                } catch (e) { return null; }
             }
+
+            (function init() {
+                const queryToken = getTokenFromQuery();
+                const storedToken = findBearerTokenInLocalStorage();
+                const token = queryToken || storedToken;
+
+                if (token) {
+                    fetch('/api/detect-role', { headers: { 'Authorization': 'Bearer ' + token } })
+                        .then(r => r.ok ? r.json() : { role: 'public' })
+                        .then(data => {
+                            if (data.role === 'admin') {
+                                window.location.replace('/docs/admin');
+                            } else if (data.role === 'flxtime') {
+                                window.location.replace('/docs/flxtime');
+                            } else if (data.role === 'general') {
+                                window.location.replace('/docs/general');
+                            } else {
+                                window.location.replace('/docs/public');
+                            }
+                        })
+                        .catch(() => window.location.replace('/docs/public'));
+                } else {
+                    window.location.replace('/docs/public');
+                }
+            })();
         </script>
     </head>
     <body>
@@ -1260,9 +1430,10 @@ def docs_public(request: Request):
 @app.get("/docs/public", include_in_schema=False)
 def docs_public_direct():
     """Public docs without auth."""
-    return get_swagger_ui_html(
+    return _swagger_ui_html_with_auth(
         openapi_url="/openapi/public.json",
-        title="Public API Docs"
+        title="Public API Docs",
+        current_role="public"
     )
 
 
