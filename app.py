@@ -1237,40 +1237,61 @@ def _swagger_ui_html_with_auth(openapi_url: str, title: str, current_role: str) 
           return null;
         }}
 
-        window.onload = function() {{
-          // If a token exists and grants a different role, auto-redirect to that role's docs
-          const t = findBearerToken();
-          if (t) {{
-            fetch('/api/detect-role', {{ headers: {{ 'Authorization': 'Bearer ' + t }} }})
-              .then(r => r.ok ? r.json() : {{ role: 'public' }})
-              .then(data => {{
-                const detectedRole = (data && data.role) || 'public';
-                const currentRole = '{current_role}';
-                if (detectedRole !== currentRole) {{
-                  const roleMap = {{
-                    admin: '/docs/admin',
-                    flxtime: '/docs/flxtime',
-                    general: '/docs/general',
-                    public: '/docs/public'
-                  }};
-                  const targetPath = roleMap[detectedRole] || '/docs/public';
-                  if (window.location.pathname !== targetPath) {{
-                    window.location.replace(targetPath);
-                    return;
-                  }}
-                }}
-                // Correct page for this role, initialize Swagger UI
-                initSwaggerUI(t);
-              }})
-              .catch(() => {{
-                // Network error, just init UI anyway
-                initSwaggerUI(t);
-              }});
-          }} else {{
-            // No token, init UI on current page
-            initSwaggerUI(null);
+                // Check role and redirect if needed; poll continuously to detect auth changes
+                function checkAndRedirectRole() {{
+                    const t = findBearerToken();
+                    const currentRole = '{current_role}';
+          
+                    if (!t && currentRole !== 'public') {{
+                        // Token removed (logged out), redirect to public
+                        window.location.replace('/docs/public');
+                        return;
           }}
-        }}
+          
+                    if (t) {{
+                        fetch('/api/detect-role', {{ headers: {{ 'Authorization': 'Bearer ' + t }} }})
+                            .then(r => r.ok ? r.json() : {{ role: 'public' }})
+                            .then(data => {{
+                                const detectedRole = (data && data.role) || 'public';
+                                if (detectedRole !== currentRole) {{
+                                    const roleMap = {{
+                                        admin: '/docs/admin',
+                                        flxtime: '/docs/flxtime',
+                                        general: '/docs/general',
+                                        public: '/docs/public'
+                                    }};
+                                    const targetPath = roleMap[detectedRole] || '/docs/public';
+                                    if (window.location.pathname !== targetPath) {{
+                                        window.location.replace(targetPath);
+                                        return;
+                                    }}
+                                }}
+                                // Correct page for this role, initialize Swagger UI once
+                                if (!window.swaggerUIInitialized) {{
+                                    initSwaggerUI(t);
+                                    window.swaggerUIInitialized = true;
+                                }}
+                            }})
+                            .catch(() => {{
+                                if (!window.swaggerUIInitialized) {{
+                                    initSwaggerUI(t);
+                                    window.swaggerUIInitialized = true;
+                                }}
+                            }});
+                    }} else {{
+                        // No token, ensure we're on public and init once
+                        if (!window.swaggerUIInitialized) {{
+                            initSwaggerUI(null);
+                            window.swaggerUIInitialized = true;
+                        }}
+                    }}
+                }}
+
+                // Check immediately on load and poll every 2 seconds for auth changes
+                window.onload = function() {{
+                    checkAndRedirectRole();
+                    setInterval(checkAndRedirectRole, 2000);
+                }}
 
         function initSwaggerUI(token) {{
           const ui = SwaggerUIBundle({{
