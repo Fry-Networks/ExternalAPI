@@ -501,18 +501,22 @@ async def lifespan(app: FastAPI):
         _openapi_admin = _filter_schema_by_roles(
             _openapi_full, include_admin=True, include_flxtime=True, allowed_tags={"Admin", "Health"}
         )
+        _openapi_admin["info"]["description"] = "Admin API: Manage scanner bans, IP whitelists, and system health."
         # - FlxTime: FlxTime + Health only
         _openapi_flxtime = _filter_schema_by_roles(
             _openapi_full, include_admin=False, include_flxtime=True, allowed_tags={"FlxTime", "Health"}
         )
+        _openapi_flxtime["info"]["description"] = "FlxTime API: Check miner existence in FryNetworks hardware database."
         # - General: everything except Admin (includes FlxTime and all general tags)
         _openapi_general = _filter_schema_by_roles(
             _openapi_full, include_admin=False, include_flxtime=True
         )
+        _openapi_general["info"]["description"] = "General API: Access to version management, credentials, installations, leases, and PoC documents."
         # - Public: Health only
         _openapi_public = _filter_schema_by_roles(
             _openapi_full, include_admin=False, include_flxtime=False, public_only=True
         )
+        _openapi_public["info"]["description"] = "Public API: No endpoints available. Please authenticate to access documentation."
     except Exception:
         # Non-fatal; continue startup even if we couldn't augment OpenAPI
         pass
