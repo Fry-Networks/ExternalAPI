@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import importlib.util
 import logging
 import os
@@ -87,6 +87,11 @@ from models import (
     MinerProfileResponse,
     VersionResponse,
     MinerCode,
+    MinerCodeOrAll,
+    UpdateVersionRequest,
+        MeasurementUpload,
+    MeasurementListResponse,
+    MeasurementRecord,
 )
 from storage import STORE
 
@@ -386,6 +391,41 @@ def _build_full_openapi(app: FastAPI):
     )
 
 
+def _rebuild_openapi_caches(app: FastAPI) -> None:
+    """(Re)build role-scoped OpenAPI caches from current app.routes.
+
+    Useful when routes change without a full process restart (e.g., reload issues)
+    or when forcing a refresh via an admin endpoint.
+    """
+    try:
+        global _openapi_full, _openapi_admin, _openapi_flxtime, _openapi_general, _openapi_public
+        _openapi_full = _build_full_openapi(app)
+        _openapi_admin = _filter_schema_by_roles(
+            _openapi_full, include_admin=True, include_flxtime=True, allowed_tags={"Admin", "Health"}
+        )
+        _openapi_admin["info"]["description"] = "Admin API: Manage scanner bans, IP whitelists, and system health."
+
+        _openapi_flxtime = _filter_schema_by_roles(
+            _openapi_full, include_admin=False, include_flxtime=True, allowed_tags={"FlxTime", "Health"}
+        )
+        _openapi_flxtime["info"]["description"] = "FlxTime API: Check miner existence in FryNetworks hardware database."
+
+        _openapi_general = _filter_schema_by_roles(
+            _openapi_full, include_admin=False, include_flxtime=True
+        )
+        _openapi_general["info"]["description"] = (
+            "General API: Access to version management, credentials, installations, leases, measurements, and PoC documents."
+        )
+
+        _openapi_public = _filter_schema_by_roles(
+            _openapi_full, include_admin=False, include_flxtime=False, public_only=True
+        )
+        _openapi_public["info"]["description"] = "Public API: No endpoints available. Please authenticate to access documentation."
+    except Exception:
+        # Non-fatal; leave caches as-is
+        pass
+
+
 def _filter_schema_by_roles(
     schema: Dict[str, Any],
     include_admin: bool,
@@ -605,6 +645,10 @@ tags_metadata = [
     {
         "name": "PoC",
         "description": "Proof of Connectivity (PoC) document storage and retrieval.",
+    },
+    {
+        "name": "Measurements",
+        "description": "Upload and query measurement data from miners indexed by hex location.",
     },
 ]
 
@@ -1502,6 +1546,17 @@ def detect_role_endpoint(request: Request):
     return {"role": role}
 
 
+@app.post("/admin/openapi/refresh", tags=["Admin"], summary="Refresh OpenAPI caches")
+def admin_refresh_openapi(token: str = Depends(verify_bearer_token_admin)) -> Dict[str, Any]:
+    """Rebuild the role-scoped OpenAPI caches. Useful after hot-reload or code updates."""
+    _rebuild_openapi_caches(app)
+    try:
+        total_paths = len((_openapi_full or {}).get("paths", {}))
+    except Exception:
+        total_paths = 0
+    return {"ok": True, "paths": total_paths}
+
+
 
 @app.get(
     "/versions/{miner_code}",
@@ -1514,10 +1569,98 @@ def get_required_version(
     token: str = Depends(verify_bearer_token_general)
 ) -> VersionResponse:
     # MinerCode is an enum; use its value (e.g. 'AEM') when querying the store
-    version = STORE.get_required_version(miner_code.value)
-    if version is None:
+    version_data = STORE.get_required_version(miner_code.value)
+    if version_data is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner code not found")
-    return VersionResponse(required_version=version)
+    return VersionResponse(
+        software_version=version_data.get("software_version"),
+        poc_version=version_data.get("poc_version")
+    )
+
+
+@app.put(
+    "/admin/versions/{miner_code}",
+    response_model=VersionResponse,
+    summary="Update required miner version",
+    tags=["Admin"],
+)
+def update_required_version(
+    miner_code: MinerCodeOrAll = Path(...),
+    update: UpdateVersionRequest = Body(...),
+    token: str = Depends(verify_bearer_token_admin)
+) -> VersionResponse:
+    """Update software and/or PoC version for a miner code or all miners.
+    
+    You can update either software_version, poc_version, or both.
+    Any field not provided will remain unchanged.
+    
+    Use miner_code="ALL" to update all miner types at once.
+    """
+    # Validate that at least one version is provided
+    if update.software_version is None and update.poc_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one of software_version or poc_version must be provided"
+        )
+    
+    # Handle ALL case - update all miner codes
+    if miner_code.value == "ALL":
+        # Get all possible miner codes (exclude ALL)
+        all_codes = [code.value for code in MinerCode]
+        
+        # Update each miner code
+        for code in all_codes:
+            existing = STORE.get_required_version(code)
+            
+            # Determine final values (keep existing if not provided in update)
+            final_software = update.software_version
+            final_poc = update.poc_version
+            
+            if existing:
+                if final_software is None:
+                    final_software = existing.get("software_version")
+                if final_poc is None:
+                    final_poc = existing.get("poc_version")
+            
+            # Update the store
+            STORE.set_required_version(
+                code,
+                software_version=final_software,
+                poc_version=final_poc
+            )
+        
+        # Return the values that were set (same for all)
+        return VersionResponse(
+            software_version=update.software_version,
+            poc_version=update.poc_version
+        )
+    
+    # Handle single miner code case
+    # Get existing versions if any
+    existing = STORE.get_required_version(miner_code.value)
+    
+    # Determine final values (keep existing if not provided in update)
+    final_software = update.software_version
+    final_poc = update.poc_version
+    
+    if existing:
+        if final_software is None:
+            final_software = existing.get("software_version")
+        if final_poc is None:
+            final_poc = existing.get("poc_version")
+    
+    # Update the store
+    STORE.set_required_version(
+        miner_code.value,
+        software_version=final_software,
+        poc_version=final_poc
+    )
+    
+    # Return the updated values
+    return VersionResponse(
+        software_version=final_software,
+        poc_version=final_poc
+    )
 
 
 @app.get(
@@ -1575,6 +1718,85 @@ def upsert_installation(
     payload = heartbeat.model_dump()
     payload.setdefault("last_seen_at", utc_now().isoformat())
     STORE.upsert_installation(miner_key, install_id, payload)
+    return GenericOk()
+
+
+@app.get(
+    "/measurements/{hex_id}",
+    response_model=Dict[str, Any],
+    summary="Query measurements by date range",
+    tags=["Measurements"],
+)
+def query_measurements(
+    hex_id: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    measurement_types: Optional[str] = None,
+    token: str = Depends(verify_bearer_token_general)
+) -> Dict[str, Any]:
+    """Return all measurements for a hex within an optional [start, end] inclusive interval.
+
+    - Dates are ISO 8601 (e.g., 2025-11-10T00:00:00Z). If only `start` is provided, results are from start onward.
+    - If only `end` is provided, results are up to that time.
+    - Optionally filter by measurement_types (comma-separated, e.g., "bandwidth,satellite").
+    
+    Returns a document with hex_id and arrays of measurements organized by type:
+    {
+        "hex_id": "8c2a1072b18cdff",
+        "bandwidth": [{...}, {...}],
+        "satellite": [{...}, {...}],
+        ...
+    }
+    """
+    # Parse date strings defensively
+    def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid datetime: {s}")
+
+    start_dt = _parse_iso(start)
+    end_dt = _parse_iso(end)
+    
+    # Parse measurement_types filter
+    types_list = None
+    if measurement_types:
+        types_list = [t.strip() for t in measurement_types.split(",") if t.strip()]
+
+    result = STORE.get_measurements(
+        hex_id=hex_id,
+        start=start_dt,
+        end=end_dt,
+        measurement_types=types_list,
+    )
+
+    return result
+
+
+@app.delete(
+    "/installations/{miner_key}/installations/{install_id}",
+    response_model=GenericOk,
+    summary="Remove installation record",
+    tags=["Installations"],
+)
+def delete_installation(
+    miner_key: str,
+    install_id: str,
+    token: str = Depends(verify_bearer_token_general)
+) -> GenericOk:
+    """Remove an installation record when a miner is uninstalled from a device.
+    
+    This will delete the installation record and clean up any associated leases.
+    Returns 404 if the installation record is not found.
+    """
+    deleted = STORE.delete_installation(miner_key, install_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Installation record not found for miner_key={miner_key}, install_id={install_id}"
+        )
     return GenericOk()
 
 
@@ -1702,6 +1924,47 @@ def put_hardware_doc(
     document.setdefault("miner_key", miner_key)
     document.setdefault("lastUpdated", utc_now().isoformat())
     STORE.put_hardware_doc(miner_key, document)
+    return GenericOk()
+
+
+@app.post(
+    "/measurements/{hex_id}",
+    response_model=GenericOk,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Upload measurement data",
+    tags=["Measurements"],
+)
+def upload_measurements(
+    hex_id: str = Path(..., description="H3 hex cell ID (registered location)"),
+    payload: MeasurementUpload = Body(...),
+    token: str = Depends(verify_bearer_token_general)
+) -> GenericOk:
+    """Upload measurement data for a specific hex location.
+    
+    This endpoint allows multiple miner types per hex location and tracks each
+    miner instance by install_id to handle multiple miners of the same type.
+    
+    Data is organized by hex_id with nested arrays per measurement_type.
+    Each measurement contains: timestamp, miner_code, install_id, and value.
+    
+    Example payload:
+    {
+        "miner_code": "BM",
+        "install_id": "abc123",
+        "timestamp": "2025-11-15T12:00:00Z",
+        "measurement_type": "bandwidth",
+        "value": {"upload_mbps": 100, "download_mbps": 500}
+    }
+    """
+    STORE.upload_measurement(
+        hex_id=hex_id,
+        miner_code=payload.miner_code.value,
+        install_id=payload.install_id,
+        timestamp=payload.timestamp,
+        measurement_type=payload.measurement_type,
+        value=payload.value,
+    )
+    
     return GenericOk()
 
 

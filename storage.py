@@ -42,21 +42,25 @@ class InMemoryStore:
 
     def __init__(self) -> None:
         self._lock = RLock()
-        self._versions: Dict[str, str] = {}
+        self._versions: Dict[str, Dict[str, Optional[str]]] = {}
         self._miner_profiles: Dict[str, Dict[str, Any]] = {}
         self._installations: Dict[Tuple[str, str], InstallationRecord] = {}
         self._leases: Dict[str, LeaseRecord] = {}
         self._hardware_docs: Dict[str, Dict[str, Any]] = {}
+        self._measurements: Dict[str, Dict[str, Any]] = {}  # keyed by hex_id
 
     # ------------------------------------------------------------------
     # Version metadata
-    def get_required_version(self, miner_code: str) -> Optional[str]:
+    def get_required_version(self, miner_code: str) -> Optional[Dict[str, Optional[str]]]:
         with self._lock:
             return self._versions.get(miner_code.upper())
 
-    def set_required_version(self, miner_code: str, version: str) -> None:
+    def set_required_version(self, miner_code: str, software_version: Optional[str] = None, poc_version: Optional[str] = None) -> None:
         with self._lock:
-            self._versions[miner_code.upper()] = version
+            self._versions[miner_code.upper()] = {
+                "software_version": software_version,
+                "poc_version": poc_version
+            }
 
     # ------------------------------------------------------------------
     # Miner credentials
@@ -76,6 +80,20 @@ class InMemoryStore:
         with self._lock:
             rec = InstallationRecord(miner_key=miner_key, install_id=install_id, payload=dict(payload))
             self._installations[(miner_key, install_id)] = rec
+
+    def delete_installation(self, miner_key: str, install_id: str) -> bool:
+        """Delete an installation record. Returns True if deleted, False if not found."""
+        with self._lock:
+            key = (miner_key, install_id)
+            if key in self._installations:
+                del self._installations[key]
+                # Also clean up any lease for this installation
+                if miner_key in self._leases:
+                    lease = self._leases[miner_key]
+                    if lease.holder_install_id == install_id:
+                        del self._leases[miner_key]
+                return True
+            return False
 
     # ------------------------------------------------------------------
     # Leases
@@ -128,6 +146,78 @@ class InMemoryStore:
         with self._lock:
             self._hardware_docs[miner_key] = dict(document)
 
+    # ------------------------------------------------------------------
+    # Measurements
+    def upload_measurement(self, hex_id: str, miner_code: str, install_id: str, timestamp: str, measurement_type: str, value: Dict[str, Any]) -> None:
+        """Store a measurement in the hex-centric structure (in-memory version).
+        
+        Appends to the measurement_type array within the hex document.
+        """
+        with self._lock:
+            # Get or create hex document
+            if hex_id not in self._measurements:
+                self._measurements[hex_id] = {"hex_id": hex_id}
+            
+            doc = self._measurements[hex_id]
+            
+            # Parse timestamp
+            ts_dt: Optional[datetime] = None
+            try:
+                ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except Exception:
+                ts_dt = None
+            
+            # Create measurement entry
+            entry = {
+                "timestamp": timestamp,
+                "timestamp_dt": ts_dt,
+                "miner_code": miner_code,
+                "install_id": install_id,
+                "value": dict(value),
+                "uploaded_at": datetime.now(timezone.utc),
+            }
+            
+            # Append to measurement type array
+            if measurement_type not in doc:
+                doc[measurement_type] = []
+            doc[measurement_type].append(entry)
+
+    def get_measurements(self, hex_id: str, start: Optional[datetime], end: Optional[datetime], measurement_types: Optional[List[str]]) -> Dict[str, Any]:
+        """Get all measurements for a hex, optionally filtered by date range and measurement types."""
+        with self._lock:
+            doc = self._measurements.get(hex_id)
+            if not doc:
+                return {"hex_id": hex_id}
+            
+            result: Dict[str, Any] = {"hex_id": hex_id}
+            
+            # Process each measurement type array
+            for key, value in doc.items():
+                if key == "hex_id":
+                    continue
+                # Skip if measurement_types filter is set and this type isn't in it
+                if measurement_types and key not in measurement_types:
+                    continue
+                # Filter array by date range if specified
+                if isinstance(value, list):
+                    filtered = []
+                    for item in value:
+                        if not isinstance(item, dict):
+                            continue
+                        ts_dt = item.get("timestamp_dt")
+                        if start and (not isinstance(ts_dt, datetime) or ts_dt < start):
+                            continue
+                        if end and (not isinstance(ts_dt, datetime) or ts_dt > end):
+                            continue
+                        # Remove internal fields for cleaner response
+                        clean_item = {k: v for k, v in item.items() if k not in ("timestamp_dt", "uploaded_at")}
+                        filtered.append(clean_item)
+                    if filtered:
+                        result[key] = filtered
+            
+            return result
+            return items[offset: offset + max(0, limit)]
+
 
 class MongoStore:
     """MongoDB-backed store. Uses environment variables:
@@ -155,6 +245,17 @@ class MongoStore:
         self._versions: Collection = poc_db.get_collection("versions")
         self._installations: Collection = poc_db.get_collection("installations")
         self._hardware_docs: Collection = poc_db.get_collection("hardware")
+        
+        # Measurements: standard collection with hex_id as primary key
+        # Each document contains all measurement types for that hex
+        self._measurements: Collection = poc_db.get_collection("measurements")
+        
+        try:
+            # Index for efficient queries by hex_id
+            self._measurements.create_index([("hex_id", 1)], unique=True)
+        except Exception:
+            # Non-fatal if index creation fails
+            pass
 
         # Always use creds database for miner profiles/credentials
         creds_db = self._client.get_database("creds")
@@ -165,12 +266,22 @@ class MongoStore:
     # No fallback mechanism - MongoDB is required
 
     # Version metadata
-    def get_required_version(self, miner_code: str) -> Optional[str]:
+    def get_required_version(self, miner_code: str) -> Optional[Dict[str, Optional[str]]]:
         doc = self._versions.find_one({"miner_code": miner_code})
-        return doc.get("software_version_needed") if doc else None
+        if doc:
+            return {
+                "software_version": doc.get("software_version_needed"),
+                "poc_version": doc.get("poc_version_needed")
+            }
+        return None
 
-    def set_required_version(self, miner_code: str, version: str) -> None:
-        self._versions.update_one({"miner_code": miner_code}, {"$set": {"software_version_needed": version, "miner_code": miner_code}}, upsert=True)
+    def set_required_version(self, miner_code: str, software_version: Optional[str] = None, poc_version: Optional[str] = None) -> None:
+        update_fields = {"miner_code": miner_code}
+        if software_version is not None:
+            update_fields["software_version_needed"] = software_version
+        if poc_version is not None:
+            update_fields["poc_version_needed"] = poc_version
+        self._versions.update_one({"miner_code": miner_code}, {"$set": update_fields}, upsert=True)
 
     # Miner profiles - always use creds.hardware collection
     def get_miner_profile(self, miner_key: str) -> Dict[str, Any]:
@@ -203,6 +314,13 @@ class MongoStore:
             "_lease": False,
         }
         update_doc: Dict[str, Any] = {"$set": {}, "$setOnInsert": set_on_insert}
+        
+        # Extract version fields directly
+        software_version = payload_copy.get("software_version_installed")
+        poc_version = payload_copy.get("poc_version_installed")
+        software_needed = payload_copy.get("software_version_needed")
+        poc_needed = payload_copy.get("poc_version_needed")
+        
         # canonical fields
         update_doc["$set"].update({
             "miner_key": miner_key,
@@ -210,7 +328,10 @@ class MongoStore:
             "last_seen_at": payload_copy.get("last_seen_at") or now,
             "hostname": payload_copy.get("hostname"),
             "os": payload_copy.get("os"),
-            "version_installed": payload_copy.get("version_installed") or payload_copy.get("version"),
+            "software_version_installed": software_version,
+            "poc_version_installed": poc_version,
+            "software_version_needed": software_needed,
+            "poc_version_needed": poc_needed,
             "is_installed": payload_copy.get("is_installed", True),
             "minerCode": payload_copy.get("minerCode"),
         })
@@ -227,6 +348,11 @@ class MongoStore:
             del update_doc["$set"][k]
 
         self._installations.update_one(key, update_doc, upsert=True)
+
+    def delete_installation(self, miner_key: str, install_id: str) -> bool:
+        """Delete an installation record. Returns True if deleted, False if not found."""
+        result = self._installations.delete_one({"miner_key": miner_key, "install_id": install_id})
+        return result.deleted_count > 0
 
     # Leases
     def acquire_lease(self, miner_key: str, install_id: str, lease_seconds: int) -> Tuple[bool, LeaseRecord]:
@@ -420,6 +546,85 @@ class MongoStore:
         doc = dict(document)
         doc["miner_key"] = miner_key
         self._hardware_docs.update_one({"miner_key": miner_key}, {"$set": doc}, upsert=True)
+
+    # Measurements
+    def upload_measurement(self, hex_id: str, miner_code: str, install_id: str, timestamp: str, measurement_type: str, value: Dict[str, Any]) -> None:
+        """Append measurement to hex document, organized by measurement_type.
+        
+        Each hex document contains arrays of measurements grouped by type:
+        {
+          "hex_id": "...",
+          "bandwidth": [{timestamp, miner_code, install_id, value}, ...],
+          "satellite": [{timestamp, miner_code, install_id, value}, ...],
+          ...
+        }
+        """
+        now = datetime.now(timezone.utc)
+        # Parse timestamp to datetime for sorting/filtering
+        ts_dt = None
+        try:
+            ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except Exception:
+            ts_dt = now
+        
+        # Prepare the measurement entry
+        entry = {
+            "timestamp": timestamp,
+            "timestamp_dt": ts_dt,
+            "miner_code": miner_code,
+            "install_id": install_id,
+            "value": dict(value),
+            "uploaded_at": now,
+        }
+        
+        # Use $push to append to the measurement_type array
+        self._measurements.update_one(
+            {"hex_id": hex_id},
+            {
+                "$set": {"hex_id": hex_id},
+                "$push": {measurement_type: entry}
+            },
+            upsert=True
+        )
+
+    def get_measurements(self, hex_id: str, start: Optional[datetime], end: Optional[datetime], measurement_types: Optional[List[str]]) -> Dict[str, Any]:
+        """Get all measurements for a hex, optionally filtered by date range and measurement types.
+        
+        Returns a document with hex_id and arrays of measurements by type.
+        If date filtering is requested, filters each array by timestamp_dt.
+        """
+        doc = self._measurements.find_one({"hex_id": hex_id})
+        if not doc:
+            return {"hex_id": hex_id}
+        
+        doc.pop("_id", None)
+        result: Dict[str, Any] = {"hex_id": hex_id}
+        
+        # Process each measurement type array
+        for key, value in doc.items():
+            if key == "hex_id":
+                continue
+            # Skip if measurement_types filter is set and this type isn't in it
+            if measurement_types and key not in measurement_types:
+                continue
+            # Filter array by date range if specified
+            if isinstance(value, list):
+                filtered = []
+                for item in value:
+                    if not isinstance(item, dict):
+                        continue
+                    ts_dt = item.get("timestamp_dt")
+                    if start and (not isinstance(ts_dt, datetime) or ts_dt < start):
+                        continue
+                    if end and (not isinstance(ts_dt, datetime) or ts_dt > end):
+                        continue
+                    # Remove internal fields for cleaner response
+                    clean_item = {k: v for k, v in item.items() if k not in ("timestamp_dt", "uploaded_at")}
+                    filtered.append(clean_item)
+                if filtered:
+                    result[key] = filtered
+        
+        return result
 
 
 # MongoDB store is required - no fallback

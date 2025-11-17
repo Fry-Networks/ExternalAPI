@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, Optional
+from typing import List
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -20,8 +21,8 @@ except Exception:
 
 # Shared example used in VersionResponse Config
 _VERSION_RESPONSE_EXAMPLE = {
-    "required_version": "1.2.3",
-    "note": "miner_code path param may be one of BM, HM, SM, XM (example list)."
+    "software_version": "5.5.7",
+    "poc_version": "1.0.0"
 }
 
 
@@ -41,12 +42,14 @@ _INSTALLATION_HEARTBEAT_EXAMPLE = {
     "miner_key": "miner-key-abc",
     "install_id": "550e8400-e29b-41d4-a716-446655440000",
     "minerCode": "AEM",
-    "version_installed": "1.2.3",
+    "software_version_installed": "5.5.7",
+    "poc_version_installed": "1.0.0",
     "hostname": "miner-01",
     "os": "Debian 11",
     "last_seen_at": "2025-10-21T07:00:00Z",
     "is_installed": True,
-    "version_needed": "1.3.0",
+    "software_version_needed": "5.6.0",
+    "poc_version_needed": "1.0.0",
     "is_uptodate": False,
     "is_outdated": True,
 }
@@ -69,6 +72,42 @@ _HARDWARE_DOCUMENT_EXAMPLE = {"document": {"mac": "AA:BB:CC:DD:EE:FF", "serial":
 _HARDWARE_RESPONSE_EXAMPLE = {"document": {"mac": "AA:BB:CC:DD:EE:FF", "serial": "SN123", "software": "1.2.3"}}
 
 
+_MEASUREMENT_UPLOAD_EXAMPLE = {
+    "miner_code": "ISM",
+    "install_id": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2025-11-10T12:34:56Z",
+    "measurement_type": "satellite",
+    "value": {
+        "satellites_visible": 12,
+        "signal_strength": -72
+    }
+}
+
+_MEASUREMENT_RECORD_EXAMPLE = {
+    "hex_id": "8c2a1072b18cdff",
+    "bandwidth": [
+        {
+            "timestamp": "2025-11-10T12:00:00Z",
+            "miner_code": "BM",
+            "install_id": "550e8400-e29b-41d4-a716-446655440000",
+            "value": {"download_mbps": 150.5, "upload_mbps": 20.3}
+        }
+    ],
+    "satellite": [
+        {
+            "timestamp": "2025-11-10T12:30:00Z",
+            "miner_code": "ISM",
+            "install_id": "660e8400-e29b-41d4-a716-446655440001",
+            "value": {"satellites_visible": 12, "signal_strength": -72}
+        }
+    ]
+}
+
+_MEASUREMENT_LIST_EXAMPLE = {
+    "items": [_MEASUREMENT_RECORD_EXAMPLE]
+}
+
+
 class VersionResponse(BaseModel):
     """Response for the versions endpoint.
 
@@ -76,24 +115,13 @@ class VersionResponse(BaseModel):
     allowed codes below to match your deployment. The list here is illustrative
     and appears in the generated OpenAPI documentation for convenience.
     """
-    required_version: Optional[str] = Field(
+    software_version: Optional[str] = Field(
         default=None,
-        description=(
-            "Latest required miner version for the requested miner family.\n\n"
-            "Allowed miner codes (replace with your actual codes):\n"
-                    " - BM: Bandwidth Miner\n"
-                    " - IDM: Indoor Decibel Miner\n"
-                    " - ODM: Outdoor Decibel Miner\n"
-                    " - ISM: Indoor Satellite Miner\n"
-                    " - OSM: Outdoor Satellite Miner\n"
-                    " - RDN: Reward Decentralization Node\n"
-                    " - SDN: Storage Decentralization Node\n"
-                    " - SVN: Storage Validator Node\n"
-                    " - AEM: AI Edge Miner\n"
-                    " - IRM: Indoor Radiation Miner\n\n"
-                    "If you need to add or change miner codes, update the documentation here"
-                    " to reflect your environment."
-        ),
+        description="Latest required software version for the requested miner family.",
+    )
+    poc_version: Optional[str] = Field(
+        default=None,
+        description="Latest required PoC (Proof of Connectivity) version for the requested miner family.",
     )
 
     class Config:
@@ -109,6 +137,21 @@ else:
 
 
 class MinerCode(str, Enum):
+    BM = "BM"
+    IDM = "IDM"
+    ODM = "ODM"
+    ISM = "ISM"
+    OSM = "OSM"
+    RDN = "RDN"
+    SDN = "SDN"
+    SVN = "SVN"
+    AEM = "AEM"
+    IRM = "IRM"
+
+
+class MinerCodeOrAll(str, Enum):
+    """Miner code enum that includes ALL for bulk operations."""
+    ALL = "ALL"
     BM = "BM"
     IDM = "IDM"
     ODM = "ODM"
@@ -147,12 +190,14 @@ class InstallationHeartbeat(BaseModel):
     miner_key: str = Field(..., description="Full miner key for this device")
     install_id: str = Field(..., description="Unique install instance id (UUID)")
     minerCode: Optional[MinerCode] = Field(default=None, description="Miner family code (optional)")
-    version_installed: Optional[str] = Field(default=None, description="Current installed software version")
+    software_version_installed: Optional[str] = Field(default=None, description="Current installed software/GUI version")
+    poc_version_installed: Optional[str] = Field(default=None, description="Current installed PoC version")
     hostname: Optional[str] = Field(default=None, description="Hostname reported by the miner")
     os: Optional[str] = Field(default=None, description="Operating system string reported by the miner")
     last_seen_at: Optional[datetime] = Field(default=None, description="ISO timestamp when heartbeat was sent")
     is_installed: Optional[bool] = Field(default=None, description="Whether the miner reports the software as installed")
-    version_needed: Optional[str] = Field(default=None, description="Optional field hinting the version required")
+    software_version_needed: Optional[str] = Field(default=None, description="Software version required (from versions endpoint)")
+    poc_version_needed: Optional[str] = Field(default=None, description="PoC version required (from versions endpoint)")
     is_uptodate: Optional[bool] = Field(default=None, description="Whether the miner considers itself up-to-date")
     is_outdated: Optional[bool] = Field(default=None, description="Whether the miner considers itself outdated")
     class Config:
@@ -219,8 +264,66 @@ class ExistsResponse(BaseModel):
         pass
 
 
+class UpdateVersionRequest(BaseModel):
+    """Request to update version information for a miner code."""
+    software_version: Optional[str] = Field(default=None, description="Software version to set (e.g., '5.5.7')")
+    poc_version: Optional[str] = Field(default=None, description="PoC version to set (e.g., '1.0.0')")
+    
+    class Config:
+        pass
+
+
+class MeasurementUpload(BaseModel):
+    """Measurement data upload from a miner instance."""
+    miner_code: MinerCode = Field(..., description="Miner type code (BM, ISM, IRM, etc.)")
+    install_id: str = Field(..., description="Installation UUID to distinguish multiple miners")
+    timestamp: str = Field(..., description="ISO 8601 timestamp of the measurement")
+    measurement_type: str = Field(..., description="Type of measurement (e.g., 'bandwidth', 'satellite', 'decibel', 'radiation')")
+    value: Dict[str, Any] = Field(..., description="Measurement value (flexible schema)")
+    
+    class Config:
+        extra = "allow"
+        pass
+
+
+class MeasurementRecord(BaseModel):
+    """Aggregated measurement data for a hex, organized by measurement type."""
+    hex_id: str = Field(..., description="H3 hex cell ID (registered location)")
+    # Dynamic fields based on measurement types available
+    class Config:
+        extra = "allow"
+        pass
+
+
+class MeasurementListResponse(BaseModel):
+    items: List[Dict[str, Any]] = Field(..., description="List of hex measurement records")
+    class Config:
+        pass
+
+
 # Attach example for ExistsResponse
 if _pyd_major >= 2:
     setattr(ExistsResponse.Config, "json_schema_extra", {"example": {"exists": True}})
 else:
     setattr(ExistsResponse.Config, "schema_extra", {"example": {"exists": True}})
+
+# Attach example for UpdateVersionRequest
+_UPDATE_VERSION_EXAMPLE = {"software_version": "5.5.7", "poc_version": "1.0.0"}
+if _pyd_major >= 2:
+    setattr(UpdateVersionRequest.Config, "json_schema_extra", {"example": _UPDATE_VERSION_EXAMPLE})
+else:
+    setattr(UpdateVersionRequest.Config, "schema_extra", {"example": _UPDATE_VERSION_EXAMPLE})
+
+# Attach example for MeasurementUpload
+if _pyd_major >= 2:
+    setattr(MeasurementUpload.Config, "json_schema_extra", {"example": _MEASUREMENT_UPLOAD_EXAMPLE})
+else:
+    setattr(MeasurementUpload.Config, "schema_extra", {"example": _MEASUREMENT_UPLOAD_EXAMPLE})
+
+# Attach examples for measurement response models
+if _pyd_major >= 2:
+    setattr(MeasurementRecord.Config, "json_schema_extra", {"example": _MEASUREMENT_RECORD_EXAMPLE})
+    setattr(MeasurementListResponse.Config, "json_schema_extra", {"example": _MEASUREMENT_LIST_EXAMPLE})
+else:
+    setattr(MeasurementRecord.Config, "schema_extra", {"example": _MEASUREMENT_RECORD_EXAMPLE})
+    setattr(MeasurementListResponse.Config, "schema_extra", {"example": _MEASUREMENT_LIST_EXAMPLE})
