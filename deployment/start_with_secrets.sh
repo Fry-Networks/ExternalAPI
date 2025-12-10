@@ -84,6 +84,7 @@ resolve_op_var MONGODB_URI
 resolve_op_var API_BEARER_TOKEN
 resolve_op_var API_BEARER_TOKEN_FLXTIME
 resolve_op_var API_BEARER_TOKEN_ADMIN
+resolve_op_var API_BEARER_TOKEN_DROPWIRELESS
 
 echo ""
 echo "Step 3: Setting up environment..."
@@ -96,6 +97,7 @@ export MONGODB_URI="$MONGODB_URI"
 export API_BEARER_TOKEN="$API_BEARER_TOKEN"
 export API_BEARER_TOKEN_FLXTIME="$API_BEARER_TOKEN_FLXTIME"
 export API_BEARER_TOKEN_ADMIN="$API_BEARER_TOKEN_ADMIN"
+export API_BEARER_TOKEN_DROPWIRELESS="$API_BEARER_TOKEN_DROPWIRELESS"
 
 echo "✅ Environment variables configured"
 echo "   - Port: $PORT"

@@ -51,9 +51,17 @@ class InMemoryStore:
 
     # ------------------------------------------------------------------
     # Version metadata
-    def get_required_version(self, miner_code: str) -> Optional[Dict[str, Optional[str]]]:
+    def get_required_version(self, miner_code: str, platform: str = "windows") -> Optional[Dict[str, Optional[str]]]:
+        normalized = (platform or "").strip().lower()
+        if normalized not in ("windows", "linux"):
+            raise ValueError("Unsupported platform")
+
         with self._lock:
-            return self._versions.get(miner_code.upper())
+            data = self._versions.get(miner_code.upper())
+            if data is None:
+                return None
+
+            return self._select_versions_by_platform(data, normalized)
 
     def set_required_version(self, miner_code: str, software_version: Optional[str] = None, poc_version: Optional[str] = None) -> None:
         with self._lock:
@@ -61,6 +69,62 @@ class InMemoryStore:
                 "software_version": software_version,
                 "poc_version": poc_version
             }
+
+    def list_supported_installers(self, os_name: str) -> List[str]:
+        """Return miner codes that have installer metadata for the requested OS."""
+        normalized = (os_name or "").strip().lower()
+        if not normalized:
+            raise ValueError("OS must be provided")
+
+        if normalized == "linux":
+            target_fields = ("linux_software_version", "linux_software_version_needed")
+        else:
+            target_fields = ("software_version", "software_version_needed")
+
+        with self._lock:
+            supported: List[str] = []
+            for code, metadata in self._versions.items():
+                if any(self._has_installer(metadata, field) for field in target_fields):
+                    supported.append(code)
+
+        return sorted(supported)
+
+    @staticmethod
+    def _has_installer(metadata: Dict[str, Any], field: str) -> bool:
+        value = metadata.get(field)
+        return value is not None and value != ""
+
+    @staticmethod
+    def _select_versions_by_platform(metadata: Dict[str, Any], platform: str) -> Dict[str, Optional[str]]:
+        """Select software/poc versions for requested platform. Returns {} when unavailable."""
+        if platform == "linux":
+            software_fields = ("linux_software_version", "linux_software_version_needed")
+            poc_fields = ("linux_poc_version", "linux_poc_version_needed")
+        else:
+            software_fields = ("software_version", "software_version_needed")
+            poc_fields = ("poc_version", "poc_version_needed")
+
+        software = InMemoryStore._first_non_empty(metadata, software_fields)
+        poc = InMemoryStore._first_non_empty(metadata, poc_fields)
+
+        # For Linux-capable miners, allow PoC to fall back to general PoC requirement.
+        if platform == "linux" and software:
+            poc = poc or InMemoryStore._first_non_empty(metadata, ("poc_version", "poc_version_needed"))
+
+        result: Dict[str, Optional[str]] = {}
+        if software:
+            result["software_version"] = software
+        if poc:
+            result["poc_version"] = poc
+        return result
+
+    @staticmethod
+    def _first_non_empty(metadata: Dict[str, Any], fields: Tuple[str, ...]) -> Optional[str]:
+        for field in fields:
+            value = metadata.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
 
     # ------------------------------------------------------------------
     # Miner credentials
@@ -266,14 +330,16 @@ class MongoStore:
     # No fallback mechanism - MongoDB is required
 
     # Version metadata
-    def get_required_version(self, miner_code: str) -> Optional[Dict[str, Optional[str]]]:
+    def get_required_version(self, miner_code: str, platform: str = "windows") -> Optional[Dict[str, Optional[str]]]:
+        normalized = (platform or "").strip().lower()
+        if normalized not in ("windows", "linux"):
+            raise ValueError("Unsupported platform")
+
         doc = self._versions.find_one({"miner_code": miner_code})
-        if doc:
-            return {
-                "software_version": doc.get("software_version_needed"),
-                "poc_version": doc.get("poc_version_needed")
-            }
-        return None
+        if doc is None:
+            return None
+
+        return self._select_versions_by_platform(doc, normalized)
 
     def set_required_version(self, miner_code: str, software_version: Optional[str] = None, poc_version: Optional[str] = None) -> None:
         update_fields = {"miner_code": miner_code}
@@ -283,10 +349,80 @@ class MongoStore:
             update_fields["poc_version_needed"] = poc_version
         self._versions.update_one({"miner_code": miner_code}, {"$set": update_fields}, upsert=True)
 
+    def list_supported_installers(self, os_name: str) -> List[str]:
+        """Query versions collection for miner codes with installer metadata."""
+        normalized = (os_name or "").strip().lower()
+        if not normalized:
+            raise ValueError("OS must be provided")
+
+        if normalized == "linux":
+            target_fields = ["linux_software_version", "linux_software_version_needed"]
+        else:
+            target_fields = ["software_version", "software_version_needed"]
+
+        or_clauses = [
+            {field: {"$exists": True, "$nin": [None, ""]}}
+            for field in target_fields
+        ]
+
+        query = {"$or": or_clauses} if len(or_clauses) > 1 else or_clauses[0]
+
+        cursor = self._versions.find(query, {"_id": 0, "miner_code": 1})
+        codes = {doc.get("miner_code") for doc in cursor if doc.get("miner_code")}
+
+        return sorted(codes)
+
+    @staticmethod
+    def _select_versions_by_platform(doc: Dict[str, Any], platform: str) -> Dict[str, Optional[str]]:
+        if platform == "linux":
+            software_fields = ("linux_software_version", "linux_software_version_needed")
+            poc_fields = ("linux_poc_version", "linux_poc_version_needed")
+        else:
+            software_fields = ("software_version", "software_version_needed")
+            poc_fields = ("poc_version", "poc_version_needed")
+
+        software = MongoStore._first_non_empty(doc, software_fields)
+        poc = MongoStore._first_non_empty(doc, poc_fields)
+
+        if platform == "linux" and software:
+            poc = poc or MongoStore._first_non_empty(doc, ("poc_version", "poc_version_needed"))
+
+        result: Dict[str, Optional[str]] = {}
+        if software:
+            result["software_version"] = software
+        if poc:
+            result["poc_version"] = poc
+        return result
+
+    @staticmethod
+    def _first_non_empty(doc: Dict[str, Any], fields: Tuple[str, ...]) -> Optional[str]:
+        for field in fields:
+            value = doc.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
     # Miner profiles - always use creds.hardware collection
     def get_miner_profile(self, miner_key: str) -> Dict[str, Any]:
         try:
+            # First try miner_profiles collection
             doc = self._miner_profiles.find_one({"miner_key": miner_key}) or self._miner_profiles.find_one({"minerKey": miner_key})
+            if doc:
+                doc = dict(doc)
+                doc.pop("_id", None)
+                doc.setdefault("exists", True)
+                return doc
+            
+            # If not found, try installations collection
+            doc = self._installations.find_one({"miner_key": miner_key})
+            if doc:
+                doc = dict(doc)
+                doc.pop("_id", None)
+                doc.setdefault("exists", True)
+                return doc
+            
+            # If not found, try hardware collection
+            doc = self._hardware_docs.find_one({"miner_key": miner_key}) or self._hardware_docs.find_one({"minerKey": miner_key})
             if doc:
                 doc = dict(doc)
                 doc.pop("_id", None)
@@ -499,33 +635,47 @@ class MongoStore:
         # find any installation doc for this miner with a lease that hasn't expired
         now = datetime.now(timezone.utc)
         rec = self._installations.find_one({"miner_key": miner_key, "lease_expires_at": {"$gt": now}})
-        if not rec:
-            return {"active": False, "holder_install_id": None, "expires_at": None, "ttl_seconds": 0}
-        expires_at = rec.get("lease_expires_at")
-        # Normalize expires_at: support datetime (naive or aware) or ISO string.
-        expires_dt = None
-        try:
-            if isinstance(expires_at, str):
-                # parse ISO format string
-                try:
-                    expires_dt = datetime.fromisoformat(expires_at)
-                except Exception:
-                    expires_dt = None
-            elif isinstance(expires_at, datetime):
-                expires_dt = expires_at
-        except Exception:
-            expires_dt = None
+        if rec:
+            # Active lease found
+            expires_at = rec.get("lease_expires_at")
+            expires_dt = self._normalize_datetime(expires_at)
+            ttl = int((expires_dt - now).total_seconds()) if expires_dt else 0
+            expires_iso = expires_dt.isoformat() if isinstance(expires_dt, datetime) else None
+            return {"active": True, "holder_install_id": rec.get("lease_install_id"), "expires_at": expires_iso, "ttl_seconds": ttl}
+        
+        # No active lease found - check for the most recent expired lease
+        cursor = self._installations.find(
+            {"miner_key": miner_key, "lease_expires_at": {"$exists": True}}
+        ).sort("lease_expires_at", -1).limit(1)
+        
+        rec = next(cursor, None)
+        if rec:
+            # Return info about the expired lease
+            expires_at = rec.get("lease_expires_at")
+            expires_dt = self._normalize_datetime(expires_at)
+            ttl = int((expires_dt - now).total_seconds()) if expires_dt else 0
+            expires_iso = expires_dt.isoformat() if isinstance(expires_dt, datetime) else None
+            return {"active": False, "holder_install_id": rec.get("lease_install_id"), "expires_at": expires_iso, "ttl_seconds": ttl}
+        
+        # No lease found at all
+        return {"active": False, "holder_install_id": None, "expires_at": None, "ttl_seconds": 0}
 
-        # If we have a naive datetime, assume UTC
-        if isinstance(expires_dt, datetime) and expires_dt.tzinfo is None:
+    def _normalize_datetime(self, dt_value) -> Optional[datetime]:
+        """Normalize datetime value to UTC datetime object."""
+        if isinstance(dt_value, str):
             try:
-                expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+                return datetime.fromisoformat(dt_value.replace('Z', '+00:00'))
             except Exception:
-                pass
-
-        ttl = max(0, int((expires_dt - now).total_seconds())) if expires_dt else 0
-        expires_iso = expires_dt.isoformat() if isinstance(expires_dt, datetime) else None
-        return {"active": True, "holder_install_id": rec.get("lease_install_id"), "expires_at": expires_iso, "ttl_seconds": ttl}
+                return None
+        elif isinstance(dt_value, datetime):
+            dt = dt_value
+        else:
+            return None
+        
+        # If naive, assume UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
 
     # Hardware aggregates
     def get_hardware_doc(self, miner_key: str) -> Dict[str, Any]:

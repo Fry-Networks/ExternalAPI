@@ -66,7 +66,7 @@ for k, v in list(os.environ.items()):
     if isinstance(v, str) and (v.startswith("op/") or v.startswith("op://")):
         os.environ[k] = _fetch_op_secret(v)
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Path, Request, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Path, Query, Request, status
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
@@ -86,10 +86,11 @@ from models import (
     LeaseResponse,
     MinerProfileResponse,
     VersionResponse,
+    InstallerSupportResponse,
     MinerCode,
     MinerCodeOrAll,
     UpdateVersionRequest,
-        MeasurementUpload,
+    MeasurementUpload,
     MeasurementListResponse,
     MeasurementRecord,
 )
@@ -375,10 +376,87 @@ def verify_bearer_token_admin(request: Request, credentials: HTTPAuthorizationCr
 
     request.state.auth_note = "OK"
     return credentials.credentials
+
+
+def verify_bearer_token_dropwireless(request: Request, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
+    """Validate bearer token against API_BEARER_TOKEN_DROPWIRELESS environment variable.
+
+    Used for DropWireless partner endpoints (leases only).
+    Raises HTTPException 401 if token is missing or invalid.
+    Returns the token if valid.
+    """
+    expected_token = os.getenv("API_BEARER_TOKEN_DROPWIRELESS")
+    
+    if not expected_token:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API_BEARER_TOKEN_DROPWIRELESS not configured on server"
+        )
+    
+    if not credentials:
+        request.state.auth_note = "MISSING TOKEN"
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if credentials.credentials != expected_token:
+        request.state.auth_note = "INVALID TOKEN"
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    request.state.auth_note = "OK"
+    return credentials.credentials
+
+
+def verify_bearer_token_leases(request: Request, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
+    """Validate lease access bearer token.
+
+    Accepts either the general API token or the DropWireless-specific token so existing
+    clients retain access while DropWireless remains scoped to lease endpoints only.
+    """
+    general_token = os.getenv("API_BEARER_TOKEN")
+    dropwireless_token = os.getenv("API_BEARER_TOKEN_DROPWIRELESS")
+
+    if not general_token and not dropwireless_token:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API_BEARER_TOKEN or API_BEARER_TOKEN_DROPWIRELESS not configured on server"
+        )
+
+    if not credentials:
+        request.state.auth_note = "MISSING TOKEN"
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    provided = credentials.credentials
+    if general_token and provided == general_token:
+        request.state.auth_note = "OK"
+        return provided
+    if dropwireless_token and provided == dropwireless_token:
+        request.state.auth_note = "OK"
+        return provided
+
+    request.state.auth_note = "INVALID TOKEN"
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid authentication token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 _openapi_full = None
 _openapi_admin = None
 _openapi_flxtime = None
 _openapi_general = None
+_openapi_dropwireless = None
 _openapi_public = None
 
 
@@ -398,7 +476,7 @@ def _rebuild_openapi_caches(app: FastAPI) -> None:
     or when forcing a refresh via an admin endpoint.
     """
     try:
-        global _openapi_full, _openapi_admin, _openapi_flxtime, _openapi_general, _openapi_public
+        global _openapi_full, _openapi_admin, _openapi_flxtime, _openapi_general, _openapi_dropwireless, _openapi_public
         _openapi_full = _build_full_openapi(app)
         _openapi_admin = _filter_schema_by_roles(
             _openapi_full, include_admin=True, include_flxtime=True, allowed_tags={"Admin", "Health"}
@@ -416,6 +494,11 @@ def _rebuild_openapi_caches(app: FastAPI) -> None:
         _openapi_general["info"]["description"] = (
             "General API: Access to version management, credentials, installations, leases, measurements, and PoC documents."
         )
+
+        _openapi_dropwireless = _filter_schema_by_roles(
+            _openapi_full, include_admin=False, include_flxtime=False, allowed_tags={"Leases", "Health"}
+        )
+        _openapi_dropwireless["info"]["description"] = "DropWireless API: Access to lease management endpoints."
 
         _openapi_public = _filter_schema_by_roles(
             _openapi_full, include_admin=False, include_flxtime=False, public_only=True
@@ -534,7 +617,7 @@ async def lifespan(app: FastAPI):
         # vendor-specific fields such as `x-enum-descriptions` into the
         # parameter schemas to prevent raw lists from showing in the UI.
         # Build and cache a base OpenAPI (will be further filtered per role routes)
-        global _openapi_full, _openapi_admin, _openapi_flxtime, _openapi_general, _openapi_public
+        global _openapi_full, _openapi_admin, _openapi_flxtime, _openapi_general, _openapi_dropwireless, _openapi_public
         _openapi_full = _build_full_openapi(app)
         # Derive role-based variants per requirements:
         # - Admin: Admin + Health only
@@ -552,6 +635,11 @@ async def lifespan(app: FastAPI):
             _openapi_full, include_admin=False, include_flxtime=True
         )
         _openapi_general["info"]["description"] = "General API: Access to version management, credentials, installations, leases, and PoC documents."
+        # - DropWireless: Leases + Health only
+        _openapi_dropwireless = _filter_schema_by_roles(
+            _openapi_full, include_admin=False, include_flxtime=False, allowed_tags={"Leases", "Health"}
+        )
+        _openapi_dropwireless["info"]["description"] = "DropWireless API: Access to lease management endpoints."
         # - Public: Health only
         _openapi_public = _filter_schema_by_roles(
             _openapi_full, include_admin=False, include_flxtime=False, public_only=True
@@ -1061,7 +1149,7 @@ def _root_redirect():
 def _detect_token_role(request: Request) -> str:
     """Detect what role a request has based on Authorization header.
     
-    Returns 'admin', 'flxtime', 'general', or 'public'.
+    Returns 'admin', 'flxtime', 'general', 'dropwireless', or 'public'.
     """
     try:
         auth_header = request.headers.get("authorization", "")
@@ -1072,6 +1160,7 @@ def _detect_token_role(request: Request) -> str:
         admin_token = os.getenv("API_BEARER_TOKEN_ADMIN")
         flxtime_token = os.getenv("API_BEARER_TOKEN_FLXTIME")
         general_token = os.getenv("API_BEARER_TOKEN")
+        dropwireless_token = os.getenv("API_BEARER_TOKEN_DROPWIRELESS")
         
         # Check admin first (highest privilege)
         if admin_token and token == admin_token:
@@ -1083,6 +1172,9 @@ def _detect_token_role(request: Request) -> str:
         if general_token and token == general_token:
             # General token can access FlxTime endpoints too
             return "general"
+        # Check DropWireless
+        if dropwireless_token and token == dropwireless_token:
+            return "dropwireless"
         
         return "public"
     except Exception:
@@ -1235,6 +1327,11 @@ def openapi_general(token: str = Depends(verify_bearer_token_general)):
     return JSONResponse(_openapi_general)
 
 
+@app.get("/openapi/dropwireless.json", include_in_schema=False)
+def openapi_dropwireless(token: str = Depends(verify_bearer_token_dropwireless)):
+    return JSONResponse(_openapi_dropwireless)
+
+
 @app.get("/openapi/public.json", include_in_schema=False)
 def openapi_public():
     return JSONResponse(_openapi_public)
@@ -1325,7 +1422,7 @@ def _swagger_ui_html_with_auth(openapi_url: str, title: str, current_role: str) 
                         .then(r => r.ok ? r.json() : {{ role: 'public' }})
                         .then(data => {{
                             const detectedRole = (data && data.role) || 'public';
-                            const roleMap = {{ admin: '/docs/admin', flxtime: '/docs/flxtime', general: '/docs/general', public: '/docs/public' }};
+                            const roleMap = {{ admin: '/docs/admin', flxtime: '/docs/flxtime', general: '/docs/general', dropwireless: '/docs/dropwireless', public: '/docs/public' }};
                             const targetPath = roleMap[detectedRole] || '/docs/public';
                             if (detectedRole !== currentRole && window.location.pathname !== targetPath) {{
                                 window.location.replace(targetPath);
@@ -1430,6 +1527,15 @@ def docs_general():
     )
 
 
+@app.get("/docs/dropwireless", include_in_schema=False)
+def docs_dropwireless():
+    return _swagger_ui_html_with_auth(
+        openapi_url="/openapi/dropwireless.json",
+        title="DropWireless API Docs",
+        current_role="dropwireless"
+    )
+
+
 @app.get("/docs", include_in_schema=False)
 def docs_public(request: Request):
     """Smart docs endpoint that serves role-specific schema based on token."""
@@ -1510,6 +1616,8 @@ def docs_public(request: Request):
                                 window.location.replace('/docs/flxtime');
                             } else if (data.role === 'general') {
                                 window.location.replace('/docs/general');
+                            } else if (data.role === 'dropwireless') {
+                                window.location.replace('/docs/dropwireless');
                             } else {
                                 window.location.replace('/docs/public');
                             }
@@ -1561,21 +1669,56 @@ def admin_refresh_openapi(token: str = Depends(verify_bearer_token_admin)) -> Di
 @app.get(
     "/versions/{miner_code}",
     response_model=VersionResponse,
+    response_model_exclude_none=True,
     summary="Get required miner version",
     tags=["Versions"],
 )
 def get_required_version(
     miner_code: MinerCode = Path(...),
+    platform: str = Query("windows", description="Target platform ('windows' or 'linux')"),
     token: str = Depends(verify_bearer_token_general)
 ) -> VersionResponse:
-    # MinerCode is an enum; use its value (e.g. 'AEM') when querying the store
-    version_data = STORE.get_required_version(miner_code.value)
+    normalized_platform = (platform or "").strip().lower()
+    if normalized_platform not in ("windows", "linux"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid platform. Use 'windows' or 'linux'.",
+        )
+
+    try:
+        version_data = STORE.get_required_version(miner_code.value, normalized_platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
     if version_data is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner code not found")
-    return VersionResponse(
-        software_version=version_data.get("software_version"),
-        poc_version=version_data.get("poc_version")
-    )
+
+    return VersionResponse(**version_data)
+
+
+@app.get(
+    "/installers/{os}/supported",
+    response_model=InstallerSupportResponse,
+    summary="List miner codes with installers for the given OS",
+    tags=["Installers"],
+)
+def list_supported_installers(
+    os: str = Path(..., description="Operating system identifier (e.g., 'linux', 'windows')"),
+    token: str = Depends(verify_bearer_token_general)
+) -> InstallerSupportResponse:
+    normalized = (os or "").strip().lower()
+    if not normalized:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Operating system must be provided",
+        )
+
+    try:
+        miner_codes = STORE.list_supported_installers(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    return InstallerSupportResponse(os=normalized, miner_codes=miner_codes)
 
 
 @app.put(
@@ -1674,6 +1817,11 @@ def get_miner_profile(
     token: str = Depends(verify_bearer_token_general)
 ) -> MinerProfileResponse:
     profile = STORE.get_miner_profile(miner_key)
+    if not profile.get("exists"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Miner key '{miner_key}' not found in credentials store"
+        )
     return MinerProfileResponse(**profile)
 
 
@@ -1810,7 +1958,7 @@ def acquire_installation_lease(
     miner_key: str,
     install_id: str,
     action: LeaseAction = Body(default_factory=LeaseAction),
-    token: str = Depends(verify_bearer_token_general)
+    token: str = Depends(verify_bearer_token_leases)
 ) -> LeaseResponse:
     granted, record = STORE.acquire_lease(miner_key, install_id, action.lease_seconds)
     # Use the returned LeaseRecord (if provided) to avoid an extra status DB call.
@@ -1849,7 +1997,7 @@ def renew_installation_lease(
     miner_key: str,
     install_id: str,
     action: LeaseAction = Body(default_factory=LeaseAction),
-    token: str = Depends(verify_bearer_token_general)
+    token: str = Depends(verify_bearer_token_leases)
 ) -> LeaseResponse:
     granted, record = STORE.renew_lease(miner_key, install_id, action.lease_seconds)
     # Use returned LeaseRecord to avoid an extra status call when possible
@@ -1885,7 +2033,7 @@ def renew_installation_lease(
 )
 def lease_status(
     miner_key: str,
-    token: str = Depends(verify_bearer_token_general)
+    token: str = Depends(verify_bearer_token_leases)
 ) -> LeaseResponse:
     status_payload = STORE.lease_status(miner_key)
     # Expose False if no active lease.

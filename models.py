@@ -25,6 +25,11 @@ _VERSION_RESPONSE_EXAMPLE = {
     "poc_version": "1.0.0"
 }
 
+_INSTALLER_SUPPORT_EXAMPLE = {
+    "os": "windows",
+    "miner_codes": ["BM", "AEM"]
+}
+
 
 # Examples for other key models
 _MINER_PROFILE_EXAMPLE = {
@@ -136,6 +141,20 @@ else:
     setattr(VersionResponse.Config, "schema_extra", {"example": _VERSION_RESPONSE_EXAMPLE})
 
 
+class InstallerSupportResponse(BaseModel):
+    os: str = Field(..., description="Normalized operating system identifier (e.g., 'linux', 'windows')")
+    miner_codes: List[str] = Field(..., description="Miner codes that have installers for the given OS")
+
+    class Config:
+        pass
+
+
+if _pyd_major >= 2:
+    setattr(InstallerSupportResponse.Config, "json_schema_extra", {"example": _INSTALLER_SUPPORT_EXAMPLE})
+else:
+    setattr(InstallerSupportResponse.Config, "schema_extra", {"example": _INSTALLER_SUPPORT_EXAMPLE})
+
+
 class MinerCode(str, Enum):
     BM = "BM"
     IDM = "IDM"
@@ -169,7 +188,7 @@ class MinerProfileResponse(BaseModel):
     # Full device record fields
     miner_key: Optional[str] = Field(..., description="Full miner key")
     address: Optional[str] = Field(default=None, description="1stParty address string")
-    miner_type: Optional[MinerCode] = Field(default=None, description="Miner family code (e.g. 'BM')")
+    miner_type: Optional[str] = Field(default=None, description="Miner family code (e.g. 'BM', 'node')")
     credentials: Optional[Dict[str, Any]] = Field(default=None, description="Credentials blob, e.g. {'mac_address': '...'}")
     credentials_saved_at: Optional[datetime] = Field(default=None, description="When credentials were saved")
     position: Optional[Dict[str, Any]] = Field(default=None, description="Position object with lat/lng/hexId")
@@ -178,7 +197,6 @@ class MinerProfileResponse(BaseModel):
     class Config:
         # Allow other fields so we can return the full document shape without failing validation
         extra = "allow"
-        pass
 
 
 class InstallationHeartbeat(BaseModel):
