@@ -48,6 +48,7 @@ class InMemoryStore:
         self._leases: Dict[str, LeaseRecord] = {}
         self._hardware_docs: Dict[str, Dict[str, Any]] = {}
         self._measurements: Dict[str, Dict[str, Any]] = {}  # keyed by hex_id
+        self._mysterium: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Version metadata
@@ -280,7 +281,25 @@ class InMemoryStore:
                         result[key] = filtered
             
             return result
-            return items[offset: offset + max(0, limit)]
+
+    # ------------------------------------------------------------------
+    # Mysterium keystores
+    def upsert_mysterium_keystore(self, miner_key: str, keystore_b64: str, identity_id: Optional[str]) -> Dict[str, Any]:
+        """Store or update a Mysterium keystore blob for a miner key."""
+        with self._lock:
+            record = {
+                "miner_key": miner_key,
+                "keystore_b64": keystore_b64,
+                "identity_id": identity_id,
+                "updated_at": datetime.now(timezone.utc),
+            }
+            self._mysterium[miner_key] = record
+            return dict(record)
+
+    def get_mysterium_keystore(self, miner_key: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            record = self._mysterium.get(miner_key)
+            return dict(record) if record else None
 
 
 class MongoStore:
@@ -313,10 +332,12 @@ class MongoStore:
         # Measurements: standard collection with hex_id as primary key
         # Each document contains all measurement types for that hex
         self._measurements: Collection = poc_db.get_collection("measurements")
+        self._mysterium: Collection = poc_db.get_collection("mysterium")
         
         try:
             # Index for efficient queries by hex_id
             self._measurements.create_index([("hex_id", 1)], unique=True)
+            self._mysterium.create_index([("miner_key", 1)], unique=True)
         except Exception:
             # Non-fatal if index creation fails
             pass
@@ -775,6 +796,30 @@ class MongoStore:
                     result[key] = filtered
         
         return result
+
+    # Mysterium keystores
+    def upsert_mysterium_keystore(self, miner_key: str, keystore_b64: str, identity_id: Optional[str]) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        payload = {
+            "miner_key": miner_key,
+            "keystore_b64": keystore_b64,
+            "identity_id": identity_id,
+            "updated_at": now,
+        }
+        self._mysterium.update_one(
+            {"miner_key": miner_key},
+            {"$set": payload},
+            upsert=True,
+        )
+        return dict(payload)
+
+    def get_mysterium_keystore(self, miner_key: str) -> Optional[Dict[str, Any]]:
+        doc = self._mysterium.find_one({"miner_key": miner_key})
+        if not doc:
+            return None
+        doc = dict(doc)
+        doc.pop("_id", None)
+        return doc
 
 
 # MongoDB store is required - no fallback

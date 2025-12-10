@@ -93,6 +93,8 @@ from models import (
     MeasurementUpload,
     MeasurementListResponse,
     MeasurementRecord,
+    MysteriumKeystoreRequest,
+    MysteriumKeystoreResponse,
 )
 from storage import STORE
 
@@ -492,7 +494,7 @@ def _rebuild_openapi_caches(app: FastAPI) -> None:
             _openapi_full, include_admin=False, include_flxtime=True
         )
         _openapi_general["info"]["description"] = (
-            "General API: Access to version management, credentials, installations, leases, measurements, and PoC documents."
+            "General API: Access to version management, credentials, installations, leases, measurements, Mysterium keystores, and PoC documents."
         )
 
         _openapi_dropwireless = _filter_schema_by_roles(
@@ -634,7 +636,9 @@ async def lifespan(app: FastAPI):
         _openapi_general = _filter_schema_by_roles(
             _openapi_full, include_admin=False, include_flxtime=True
         )
-        _openapi_general["info"]["description"] = "General API: Access to version management, credentials, installations, leases, and PoC documents."
+        _openapi_general["info"]["description"] = (
+            "General API: Access to version management, credentials, installations, leases, measurements, Mysterium keystores, and PoC documents."
+        )
         # - DropWireless: Leases + Health only
         _openapi_dropwireless = _filter_schema_by_roles(
             _openapi_full, include_admin=False, include_flxtime=False, allowed_tags={"Leases", "Health"}
@@ -733,6 +737,10 @@ tags_metadata = [
     {
         "name": "PoC",
         "description": "Proof of Connectivity (PoC) document storage and retrieval.",
+    },
+    {
+        "name": "Mysterium",
+        "description": "Store and retrieve Mysterium keystore blobs per miner key.",
     },
     {
         "name": "Measurements",
@@ -2073,6 +2081,66 @@ def put_hardware_doc(
     document.setdefault("lastUpdated", utc_now().isoformat())
     STORE.put_hardware_doc(miner_key, document)
     return GenericOk()
+
+
+@app.put(
+    "/mysterium/keystore",
+    response_model=GenericOk,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Store Mysterium keystore",
+    tags=["Mysterium"],
+)
+def put_mysterium_keystore(
+    payload: MysteriumKeystoreRequest,
+    token: str = Depends(verify_bearer_token_general)
+) -> GenericOk:
+    miner_key = (payload.miner_key or "").strip()
+    keystore_b64 = (payload.keystore_b64 or "").strip()
+    identity_id = (payload.identity_id or "").strip() or None
+
+    if not miner_key or not keystore_b64:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="miner_key and keystore_b64 are required",
+        )
+
+    STORE.upsert_mysterium_keystore(
+        miner_key=miner_key,
+        keystore_b64=keystore_b64,
+        identity_id=identity_id,
+    )
+    return GenericOk()
+
+
+@app.get(
+    "/mysterium/keystore",
+    response_model=MysteriumKeystoreResponse,
+    response_model_exclude_none=True,
+    summary="Fetch Mysterium keystore",
+    tags=["Mysterium"],
+)
+def get_mysterium_keystore(
+    miner_key: str = Query(..., description="Full miner key whose keystore should be returned"),
+    token: str = Depends(verify_bearer_token_general)
+) -> MysteriumKeystoreResponse:
+    normalized_key = (miner_key or "").strip()
+    if not normalized_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="miner_key query parameter is required",
+        )
+
+    record = STORE.get_mysterium_keystore(normalized_key)
+    if not record or not record.get("keystore_b64"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No keystore found for the provided miner_key",
+        )
+
+    return MysteriumKeystoreResponse(
+        keystore_b64=record.get("keystore_b64"),
+        identity_id=record.get("identity_id"),
+    )
 
 
 @app.post(

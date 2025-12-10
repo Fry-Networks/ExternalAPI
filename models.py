@@ -112,6 +112,17 @@ _MEASUREMENT_LIST_EXAMPLE = {
     "items": [_MEASUREMENT_RECORD_EXAMPLE]
 }
 
+_MYSTERIUM_KEYSTORE_REQUEST_EXAMPLE = {
+    "miner_key": "BM-ABCDE12345",
+    "keystore_b64": "ZXhhbXBsZS1rZXlzdG9yZS1jb250ZW50",
+    "identity_id": "0xidentity",
+}
+
+_MYSTERIUM_KEYSTORE_RESPONSE_EXAMPLE = {
+    "keystore_b64": "ZXhhbXBsZS1rZXlzdG9yZS1jb250ZW50",
+    "identity_id": "0xidentity",
+}
+
 
 class VersionResponse(BaseModel):
     """Response for the versions endpoint.
@@ -253,12 +264,31 @@ class HardwareResponse(BaseModel):
         pass
 
 
+class MysteriumKeystoreRequest(BaseModel):
+    miner_key: str = Field(..., description="Full miner key to associate with this keystore")
+    keystore_b64: str = Field(..., description="Base64-encoded contents of keystore.json")
+    identity_id: Optional[str] = Field(default=None, description="Optional Mysterium identity id")
+
+    class Config:
+        pass
+
+
+class MysteriumKeystoreResponse(BaseModel):
+    keystore_b64: str = Field(..., description="Stored base64-encoded keystore.json contents")
+    identity_id: Optional[str] = Field(default=None, description="Optional Mysterium identity id")
+
+    class Config:
+        pass
+
+
 # Attach examples to other models' Configs in a Pydantic-version-aware way
 _MODEL_EXAMPLES = [
     (LeaseAction, _LEASE_ACTION_EXAMPLE),
     (LeaseResponse, _LEASE_RESPONSE_EXAMPLE),
     (HardwareDocument, _HARDWARE_DOCUMENT_EXAMPLE),
     (HardwareResponse, _HARDWARE_RESPONSE_EXAMPLE),
+    (MysteriumKeystoreRequest, _MYSTERIUM_KEYSTORE_REQUEST_EXAMPLE),
+    (MysteriumKeystoreResponse, _MYSTERIUM_KEYSTORE_RESPONSE_EXAMPLE),
     (InstallationHeartbeat, _INSTALLATION_HEARTBEAT_EXAMPLE),
     (MinerProfileResponse, _MINER_PROFILE_EXAMPLE),
 ]
