@@ -1683,23 +1683,34 @@ def admin_refresh_openapi(token: str = Depends(verify_bearer_token_admin)) -> Di
 )
 def get_required_version(
     miner_code: MinerCode = Path(...),
-    platform: str = Query("windows", description="Target platform ('windows' or 'linux')"),
+    platform: Optional[str] = Query(None, description="Optional platform filter ('windows', 'linux', 'test-windows', 'test-linux')"),
     token: str = Depends(verify_bearer_token_general)
 ) -> VersionResponse:
-    normalized_platform = (platform or "").strip().lower()
-    if normalized_platform not in ("windows", "linux"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid platform. Use 'windows' or 'linux'.",
-        )
-
     try:
-        version_data = STORE.get_required_version(miner_code.value, normalized_platform)
+        normalized_platform = None
+        if platform is not None:
+            normalized_platform = (platform or "").strip().lower().replace("_", "-")
+            if normalized_platform not in ("windows", "linux", "test-windows", "test-linux"):
+                raise ValueError("Invalid platform. Use 'windows', 'linux', 'test-windows', or 'test-linux'.")
+
+        version_data = STORE.get_version_document(miner_code.value)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load version data")
 
     if version_data is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner code not found")
+
+    if normalized_platform:
+        platform_section = version_data.get(normalized_platform)
+        if not platform_section:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No version data for platform '{normalized_platform}'")
+        filtered: Dict[str, Any] = {"miner_code": version_data.get("miner_code", miner_code.value)}
+        if version_data.get("_id") is not None:
+            filtered["_id"] = version_data.get("_id")
+        filtered[normalized_platform] = platform_section
+        return VersionResponse(**filtered)
 
     return VersionResponse(**version_data)
 
@@ -1740,78 +1751,55 @@ def update_required_version(
     update: UpdateVersionRequest = Body(...),
     token: str = Depends(verify_bearer_token_admin)
 ) -> VersionResponse:
-    """Update software and/or PoC version for a miner code or all miners.
-    
-    You can update either software_version, poc_version, or both.
-    Any field not provided will remain unchanged.
-    
-    Use miner_code="ALL" to update all miner types at once.
-    """
-    # Validate that at least one version is provided
-    if update.software_version is None and update.poc_version is None:
+    """Update platform-scoped version requirements for a miner code or all miners."""
+
+    def _dump(model_obj: Any) -> Dict[str, Any]:
+        if model_obj is None:
+            return {}
+        if hasattr(model_obj, "model_dump"):
+            return model_obj.model_dump(exclude_none=True, by_alias=True)  # pydantic v2
+        return model_obj.dict(exclude_none=True, by_alias=True)  # type: ignore[attr-defined]
+
+    update_payload: Dict[str, Any] = {}
+    for attr, alias in (
+        ("windows", "windows"),
+        ("linux", "linux"),
+        ("test_windows", "test-windows"),
+        ("test_linux", "test-linux"),
+    ):
+        section = getattr(update, attr, None)
+        data = _dump(section)
+        if data:
+            update_payload[alias] = data
+
+    if not update_payload:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one of software_version or poc_version must be provided"
+            detail="At least one platform section must be provided"
         )
-    
+
     # Handle ALL case - update all miner codes
     if miner_code.value == "ALL":
-        # Get all possible miner codes (exclude ALL)
         all_codes = [code.value for code in MinerCode]
-        
-        # Update each miner code
+        last_doc: Optional[Dict[str, Any]] = None
         for code in all_codes:
-            existing = STORE.get_required_version(code)
-            
-            # Determine final values (keep existing if not provided in update)
-            final_software = update.software_version
-            final_poc = update.poc_version
-            
-            if existing:
-                if final_software is None:
-                    final_software = existing.get("software_version")
-                if final_poc is None:
-                    final_poc = existing.get("poc_version")
-            
-            # Update the store
-            STORE.set_required_version(
-                code,
-                software_version=final_software,
-                poc_version=final_poc
-            )
-        
-        # Return the values that were set (same for all)
-        return VersionResponse(
-            software_version=update.software_version,
-            poc_version=update.poc_version
-        )
-    
+            try:
+                last_doc = STORE.update_version_document(code, update_payload)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        response_payload = dict(update_payload)
+        response_payload["miner_code"] = "ALL"
+        if last_doc and last_doc.get("_id") is not None:
+            response_payload["_id"] = last_doc.get("_id")
+        return VersionResponse(**response_payload)
+
     # Handle single miner code case
-    # Get existing versions if any
-    existing = STORE.get_required_version(miner_code.value)
-    
-    # Determine final values (keep existing if not provided in update)
-    final_software = update.software_version
-    final_poc = update.poc_version
-    
-    if existing:
-        if final_software is None:
-            final_software = existing.get("software_version")
-        if final_poc is None:
-            final_poc = existing.get("poc_version")
-    
-    # Update the store
-    STORE.set_required_version(
-        miner_code.value,
-        software_version=final_software,
-        poc_version=final_poc
-    )
-    
-    # Return the updated values
-    return VersionResponse(
-        software_version=final_software,
-        poc_version=final_poc
-    )
+    try:
+        updated_doc = STORE.update_version_document(miner_code.value, update_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    return VersionResponse(**updated_doc)
 
 
 @app.get(

@@ -52,66 +52,90 @@ class InMemoryStore:
 
     # ------------------------------------------------------------------
     # Version metadata
-    def get_required_version(self, miner_code: str, platform: str = "windows") -> Optional[Dict[str, Optional[str]]]:
-        normalized = (platform or "").strip().lower()
-        if normalized not in ("windows", "linux"):
-            raise ValueError("Unsupported platform")
-
+    def get_version_document(self, miner_code: str) -> Optional[Dict[str, Any]]:
+        """Return the full version document for a miner code."""
         with self._lock:
             data = self._versions.get(miner_code.upper())
-            if data is None:
-                return None
+            return self._coerce_version_sections(dict(data)) if data is not None else None
 
-            return self._select_versions_by_platform(data, normalized)
+    def get_required_version(self, miner_code: str, platform: str = "windows") -> Optional[Dict[str, Optional[str]]]:
+        """Compatibility helper that returns software/poc versions for a single platform."""
+        normalized = self._normalize_platform_key(platform)
+        doc = self.get_version_document(miner_code)
+        if doc is None:
+            return None
+        return self._select_versions_by_platform(doc, normalized)
+
+    def update_version_document(self, miner_code: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge platform-specific version updates into the stored document."""
+        normalized_updates = self._normalize_updates(updates)
+        if not normalized_updates:
+            raise ValueError("No version fields provided")
+
+        with self._lock:
+            existing = dict(self._versions.get(miner_code.upper()) or {})
+            merged = self._merge_version_doc(existing, normalized_updates)
+            merged["miner_code"] = miner_code
+            self._versions[miner_code.upper()] = merged
+            return self._coerce_version_sections(dict(merged))
 
     def set_required_version(self, miner_code: str, software_version: Optional[str] = None, poc_version: Optional[str] = None) -> None:
-        with self._lock:
-            self._versions[miner_code.upper()] = {
-                "software_version": software_version,
-                "poc_version": poc_version
-            }
+        """Compatibility wrapper to update Windows version requirements."""
+        payload: Dict[str, Any] = {"windows": {}}
+        if software_version is not None:
+            payload["windows"]["software_version_needed"] = software_version
+        if poc_version is not None:
+            payload["windows"]["poc_version_needed"] = poc_version
+        self.update_version_document(miner_code, payload)
 
     def list_supported_installers(self, os_name: str) -> List[str]:
         """Return miner codes that have installer metadata for the requested OS."""
-        normalized = (os_name or "").strip().lower()
-        if not normalized:
+        normalized = self._normalize_platform_key(os_name)
+        if normalized not in ("linux", "windows"):
             raise ValueError("OS must be provided")
-
-        if normalized == "linux":
-            target_fields = ("linux_software_version", "linux_software_version_needed")
-        else:
-            target_fields = ("software_version", "software_version_needed")
 
         with self._lock:
             supported: List[str] = []
             for code, metadata in self._versions.items():
-                if any(self._has_installer(metadata, field) for field in target_fields):
+                if self._has_installer(metadata, normalized):
                     supported.append(code)
 
         return sorted(supported)
 
     @staticmethod
-    def _has_installer(metadata: Dict[str, Any], field: str) -> bool:
-        value = metadata.get(field)
-        return value is not None and value != ""
+    def _has_installer(metadata: Dict[str, Any], platform: str) -> bool:
+        platform_key = InMemoryStore._normalize_platform_key(platform)
+        section = InMemoryStore._coerce_version_sections(metadata).get(platform_key) or {}
+        if not isinstance(section, dict):
+            return False
+        return any(InMemoryStore._has_value(section.get(field)) for field in ("software_version_needed", "poc_version_needed"))
+
+    @staticmethod
+    def _merge_version_doc(existing: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(existing)
+        for platform_key, payload in updates.items():
+            platform_key = InMemoryStore._normalize_platform_key(platform_key)
+            if payload is None:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            current = dict(merged.get(platform_key) or {})
+            for field in ("software_version_needed", "poc_version_needed"):
+                if payload.get(field) is not None:
+                    current[field] = payload[field]
+            if current:
+                merged[platform_key] = current
+        return merged
 
     @staticmethod
     def _select_versions_by_platform(metadata: Dict[str, Any], platform: str) -> Dict[str, Optional[str]]:
         """Select software/poc versions for requested platform. Returns {} when unavailable."""
-        if platform == "linux":
-            software_fields = ("linux_software_version", "linux_software_version_needed")
-            poc_fields = ("linux_poc_version", "linux_poc_version_needed")
-        else:
-            software_fields = ("software_version", "software_version_needed")
-            poc_fields = ("poc_version", "poc_version_needed")
-
-        software = InMemoryStore._first_non_empty(metadata, software_fields)
-        poc = InMemoryStore._first_non_empty(metadata, poc_fields)
-
-        # For Linux-capable miners, allow PoC to fall back to general PoC requirement.
-        if platform == "linux" and software:
-            poc = poc or InMemoryStore._first_non_empty(metadata, ("poc_version", "poc_version_needed"))
-
+        platform_key = InMemoryStore._normalize_platform_key(platform)
+        section = metadata.get(platform_key) or {}
+        if not isinstance(section, dict):
+            return {}
+        software = InMemoryStore._first_non_empty(section, ("software_version_needed",))
+        poc = InMemoryStore._first_non_empty(section, ("poc_version_needed",))
         result: Dict[str, Optional[str]] = {}
         if software:
             result["software_version"] = software
@@ -126,6 +150,64 @@ class InMemoryStore:
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return None
+
+    @staticmethod
+    def _normalize_platform_key(platform: str) -> str:
+        normalized = (platform or "").strip().lower().replace("_", "-")
+        if normalized not in ("windows", "linux", "test-windows", "test-linux"):
+            raise ValueError("Unsupported platform")
+        return normalized
+
+    @staticmethod
+    def _normalize_updates(updates: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for key, value in updates.items():
+            if key in ("miner_code",):
+                continue
+            try:
+                platform_key = InMemoryStore._normalize_platform_key(key)
+            except ValueError:
+                continue
+            normalized[platform_key] = value
+        return normalized
+
+    @staticmethod
+    def _has_value(value: Any) -> bool:
+        return value is not None and value != ""
+
+    @staticmethod
+    def _coerce_version_sections(doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure legacy flat fields are mapped into platform sections."""
+        coerced = dict(doc)
+
+        windows_section = dict(coerced.get("windows") or {})
+        linux_section = dict(coerced.get("linux") or {})
+
+        # Fill Windows section from legacy fields if missing
+        if not InMemoryStore._has_value(windows_section.get("software_version_needed")):
+            legacy = InMemoryStore._first_non_empty(coerced, ("software_version_needed", "software_version"))
+            if legacy:
+                windows_section["software_version_needed"] = legacy
+        if not InMemoryStore._has_value(windows_section.get("poc_version_needed")):
+            legacy = InMemoryStore._first_non_empty(coerced, ("poc_version_needed", "poc_version"))
+            if legacy:
+                windows_section["poc_version_needed"] = legacy
+        if windows_section:
+            coerced["windows"] = windows_section
+
+        # Fill Linux section from legacy fields if missing
+        if not InMemoryStore._has_value(linux_section.get("software_version_needed")):
+            legacy = InMemoryStore._first_non_empty(coerced, ("linux_software_version_needed", "linux_software_version"))
+            if legacy:
+                linux_section["software_version_needed"] = legacy
+        if not InMemoryStore._has_value(linux_section.get("poc_version_needed")):
+            legacy = InMemoryStore._first_non_empty(coerced, ("linux_poc_version_needed", "linux_poc_version", "poc_version_needed", "poc_version"))
+            if legacy:
+                linux_section["poc_version_needed"] = legacy
+        if linux_section:
+            coerced["linux"] = linux_section
+
+        return coerced
 
     # ------------------------------------------------------------------
     # Miner credentials
@@ -351,43 +433,75 @@ class MongoStore:
     # No fallback mechanism - MongoDB is required
 
     # Version metadata
-    def get_required_version(self, miner_code: str, platform: str = "windows") -> Optional[Dict[str, Optional[str]]]:
-        normalized = (platform or "").strip().lower()
-        if normalized not in ("windows", "linux"):
-            raise ValueError("Unsupported platform")
-
+    def get_version_document(self, miner_code: str) -> Optional[Dict[str, Any]]:
         doc = self._versions.find_one({"miner_code": miner_code})
         if doc is None:
             return None
+        return self._normalize_version_doc(doc)
 
+    def get_required_version(self, miner_code: str, platform: str = "windows") -> Optional[Dict[str, Optional[str]]]:
+        normalized = self._normalize_platform_key(platform)
+        doc = self.get_version_document(miner_code)
+        if doc is None:
+            return None
         return self._select_versions_by_platform(doc, normalized)
 
+    def update_version_document(self, miner_code: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        normalized_updates = self._normalize_updates(updates)
+        if not normalized_updates:
+            raise ValueError("No version fields provided")
+
+        set_fields: Dict[str, Any] = {"miner_code": miner_code}
+        for platform_key, payload in normalized_updates.items():
+            if payload is None or not isinstance(payload, dict):
+                continue
+            for field in ("software_version_needed", "poc_version_needed"):
+                if payload.get(field) is not None:
+                    set_fields[f"{platform_key}.{field}"] = payload[field]
+
+        updated = self._versions.find_one_and_update(
+            {"miner_code": miner_code},
+            {"$set": set_fields},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        return self._normalize_version_doc(updated or {})
+
     def set_required_version(self, miner_code: str, software_version: Optional[str] = None, poc_version: Optional[str] = None) -> None:
-        update_fields = {"miner_code": miner_code}
+        """Compatibility wrapper to update Windows version requirements."""
+        payload: Dict[str, Any] = {"windows": {}}
         if software_version is not None:
-            update_fields["software_version_needed"] = software_version
+            payload["windows"]["software_version_needed"] = software_version
         if poc_version is not None:
-            update_fields["poc_version_needed"] = poc_version
-        self._versions.update_one({"miner_code": miner_code}, {"$set": update_fields}, upsert=True)
+            payload["windows"]["poc_version_needed"] = poc_version
+        self.update_version_document(miner_code=miner_code, updates=payload)
 
     def list_supported_installers(self, os_name: str) -> List[str]:
         """Query versions collection for miner codes with installer metadata."""
-        normalized = (os_name or "").strip().lower()
-        if not normalized:
+        normalized = self._normalize_platform_key(os_name)
+        if normalized not in ("linux", "windows"):
             raise ValueError("OS must be provided")
 
         if normalized == "linux":
-            target_fields = ["linux_software_version", "linux_software_version_needed"]
+            fields = [
+                f"{normalized}.software_version_needed",
+                f"{normalized}.poc_version_needed",
+                "linux_software_version_needed",
+                "linux_software_version",
+                "linux_poc_version_needed",
+                "linux_poc_version",
+            ]
         else:
-            target_fields = ["software_version", "software_version_needed"]
-
-        or_clauses = [
-            {field: {"$exists": True, "$nin": [None, ""]}}
-            for field in target_fields
-        ]
-
-        query = {"$or": or_clauses} if len(or_clauses) > 1 else or_clauses[0]
-
+            fields = [
+                f"{normalized}.software_version_needed",
+                f"{normalized}.poc_version_needed",
+                "software_version_needed",
+                "software_version",
+                "poc_version_needed",
+                "poc_version",
+            ]
+        or_clauses = [{field: {"$exists": True, "$nin": [None, ""]}} for field in fields]
+        query = {"$or": or_clauses}
         cursor = self._versions.find(query, {"_id": 0, "miner_code": 1})
         codes = {doc.get("miner_code") for doc in cursor if doc.get("miner_code")}
 
@@ -395,18 +509,12 @@ class MongoStore:
 
     @staticmethod
     def _select_versions_by_platform(doc: Dict[str, Any], platform: str) -> Dict[str, Optional[str]]:
-        if platform == "linux":
-            software_fields = ("linux_software_version", "linux_software_version_needed")
-            poc_fields = ("linux_poc_version", "linux_poc_version_needed")
-        else:
-            software_fields = ("software_version", "software_version_needed")
-            poc_fields = ("poc_version", "poc_version_needed")
-
-        software = MongoStore._first_non_empty(doc, software_fields)
-        poc = MongoStore._first_non_empty(doc, poc_fields)
-
-        if platform == "linux" and software:
-            poc = poc or MongoStore._first_non_empty(doc, ("poc_version", "poc_version_needed"))
+        platform_key = MongoStore._normalize_platform_key(platform)
+        section = doc.get(platform_key) or {}
+        if not isinstance(section, dict):
+            return {}
+        software = MongoStore._first_non_empty(section, ("software_version_needed",))
+        poc = MongoStore._first_non_empty(section, ("poc_version_needed",))
 
         result: Dict[str, Optional[str]] = {}
         if software:
@@ -416,12 +524,74 @@ class MongoStore:
         return result
 
     @staticmethod
+    def _normalize_version_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = dict(doc or {})
+        if "_id" in cleaned:
+            try:
+                cleaned["_id"] = str(cleaned["_id"]) if cleaned["_id"] is not None else None
+            except Exception:
+                pass
+        return MongoStore._coerce_version_sections(cleaned)
+
+    @staticmethod
     def _first_non_empty(doc: Dict[str, Any], fields: Tuple[str, ...]) -> Optional[str]:
         for field in fields:
             value = doc.get(field)
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return None
+
+    @staticmethod
+    def _normalize_platform_key(platform: str) -> str:
+        normalized = (platform or "").strip().lower().replace("_", "-")
+        if normalized not in ("windows", "linux", "test-windows", "test-linux"):
+            raise ValueError("Unsupported platform")
+        return normalized
+
+    @staticmethod
+    def _normalize_updates(updates: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for key, value in updates.items():
+            if key in ("miner_code",):
+                continue
+            try:
+                platform_key = MongoStore._normalize_platform_key(key)
+            except ValueError:
+                continue
+            normalized[platform_key] = value
+        return normalized
+
+    @staticmethod
+    def _coerce_version_sections(doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Map legacy flat version fields into platform sections when needed."""
+        coerced = dict(doc)
+
+        windows_section = dict(coerced.get("windows") or {})
+        linux_section = dict(coerced.get("linux") or {})
+
+        if not MongoStore._first_non_empty(windows_section, ("software_version_needed",)):
+            legacy = MongoStore._first_non_empty(coerced, ("software_version_needed", "software_version"))
+            if legacy:
+                windows_section["software_version_needed"] = legacy
+        if not MongoStore._first_non_empty(windows_section, ("poc_version_needed",)):
+            legacy = MongoStore._first_non_empty(coerced, ("poc_version_needed", "poc_version"))
+            if legacy:
+                windows_section["poc_version_needed"] = legacy
+        if windows_section:
+            coerced["windows"] = windows_section
+
+        if not MongoStore._first_non_empty(linux_section, ("software_version_needed",)):
+            legacy = MongoStore._first_non_empty(coerced, ("linux_software_version_needed", "linux_software_version"))
+            if legacy:
+                linux_section["software_version_needed"] = legacy
+        if not MongoStore._first_non_empty(linux_section, ("poc_version_needed",)):
+            legacy = MongoStore._first_non_empty(coerced, ("linux_poc_version_needed", "linux_poc_version", "poc_version_needed", "poc_version"))
+            if legacy:
+                linux_section["poc_version_needed"] = legacy
+        if linux_section:
+            coerced["linux"] = linux_section
+
+        return coerced
 
     # Miner profiles - always use creds.hardware collection
     def get_miner_profile(self, miner_key: str) -> Dict[str, Any]:

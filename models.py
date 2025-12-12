@@ -21,8 +21,23 @@ except Exception:
 
 # Shared example used in VersionResponse Config
 _VERSION_RESPONSE_EXAMPLE = {
-    "software_version": "5.5.7",
-    "poc_version": "1.0.0"
+    "miner_code": "BM",
+    "windows": {
+        "software_version_needed": "6.2.0",
+        "poc_version_needed": "1.5.0",
+    },
+    "linux": {
+        "software_version_needed": "linux-1.3.0",
+        "poc_version_needed": "linux-1.0.0",
+    },
+    "test-windows": {
+        "software_version_needed": "6.3.0",
+        "poc_version_needed": "1.6.0",
+    },
+    "test-linux": {
+        "software_version_needed": "linux-1.4.0",
+        "poc_version_needed": "linux-1.1.0",
+    },
 }
 
 _INSTALLER_SUPPORT_EXAMPLE = {
@@ -124,20 +139,49 @@ _MYSTERIUM_KEYSTORE_RESPONSE_EXAMPLE = {
 }
 
 
-class VersionResponse(BaseModel):
-    """Response for the versions endpoint.
-
-    Note: The `miner_code` path parameter identifies a miner family. Update the
-    allowed codes below to match your deployment. The list here is illustrative
-    and appears in the generated OpenAPI documentation for convenience.
-    """
-    software_version: Optional[str] = Field(
+class VersionPlatformDetails(BaseModel):
+    """Version requirements for a specific platform or cohort."""
+    software_version_needed: Optional[str] = Field(
         default=None,
-        description="Latest required software version for the requested miner family.",
+        description="Required software version for this platform/cohort (e.g., '6.2.0').",
     )
-    poc_version: Optional[str] = Field(
+    poc_version_needed: Optional[str] = Field(
         default=None,
-        description="Latest required PoC (Proof of Connectivity) version for the requested miner family.",
+        description="Required PoC version for this platform/cohort (e.g., '1.5.0').",
+    )
+
+    class Config:
+        pass
+
+
+class VersionResponse(BaseModel):
+    """Response for the versions endpoint using platform-scoped fields."""
+    id: Optional[str] = Field(
+        default=None,
+        alias="_id",
+        description="Optional document identifier from the versions collection.",
+    )
+    miner_code: Optional[str] = Field(
+        default=None,
+        description="Miner family code (e.g., 'BM').",
+    )
+    windows: Optional[VersionPlatformDetails] = Field(
+        default=None,
+        description="Required versions for Windows miners.",
+    )
+    linux: Optional[VersionPlatformDetails] = Field(
+        default=None,
+        description="Required versions for Linux miners.",
+    )
+    test_windows: Optional[VersionPlatformDetails] = Field(
+        default=None,
+        alias="test-windows",
+        description="Required versions for Windows test cohort.",
+    )
+    test_linux: Optional[VersionPlatformDetails] = Field(
+        default=None,
+        alias="test-linux",
+        description="Required versions for Linux test cohort.",
     )
 
     class Config:
@@ -147,8 +191,12 @@ class VersionResponse(BaseModel):
 # Attach the proper schema-example to the nested Config class to avoid
 # Pydantic v2 deprecation warnings while keeping static typing happy.
 if _pyd_major >= 2:
+    setattr(VersionPlatformDetails.Config, "populate_by_name", True)
+    setattr(VersionResponse.Config, "populate_by_name", True)
     setattr(VersionResponse.Config, "json_schema_extra", {"example": _VERSION_RESPONSE_EXAMPLE})
 else:
+    setattr(VersionPlatformDetails.Config, "allow_population_by_field_name", True)
+    setattr(VersionResponse.Config, "allow_population_by_field_name", True)
     setattr(VersionResponse.Config, "schema_extra", {"example": _VERSION_RESPONSE_EXAMPLE})
 
 
@@ -313,9 +361,25 @@ class ExistsResponse(BaseModel):
 
 
 class UpdateVersionRequest(BaseModel):
-    """Request to update version information for a miner code."""
-    software_version: Optional[str] = Field(default=None, description="Software version to set (e.g., '5.5.7')")
-    poc_version: Optional[str] = Field(default=None, description="PoC version to set (e.g., '1.0.0')")
+    """Request to update version information for one or more platforms."""
+    windows: Optional[VersionPlatformDetails] = Field(
+        default=None,
+        description="Version requirements for Windows miners.",
+    )
+    linux: Optional[VersionPlatformDetails] = Field(
+        default=None,
+        description="Version requirements for Linux miners.",
+    )
+    test_windows: Optional[VersionPlatformDetails] = Field(
+        default=None,
+        alias="test-windows",
+        description="Version requirements for Windows test cohort.",
+    )
+    test_linux: Optional[VersionPlatformDetails] = Field(
+        default=None,
+        alias="test-linux",
+        description="Version requirements for Linux test cohort.",
+    )
     
     class Config:
         pass
@@ -356,10 +420,16 @@ else:
     setattr(ExistsResponse.Config, "schema_extra", {"example": {"exists": True}})
 
 # Attach example for UpdateVersionRequest
-_UPDATE_VERSION_EXAMPLE = {"software_version": "5.5.7", "poc_version": "1.0.0"}
+_UPDATE_VERSION_EXAMPLE = {
+    "windows": {"software_version_needed": "6.2.0", "poc_version_needed": "1.5.0"},
+    "linux": {"software_version_needed": "linux-1.3.0"},
+    "test-windows": {"software_version_needed": "6.3.0", "poc_version_needed": "1.6.0"},
+}
 if _pyd_major >= 2:
+    setattr(UpdateVersionRequest.Config, "populate_by_name", True)
     setattr(UpdateVersionRequest.Config, "json_schema_extra", {"example": _UPDATE_VERSION_EXAMPLE})
 else:
+    setattr(UpdateVersionRequest.Config, "allow_population_by_field_name", True)
     setattr(UpdateVersionRequest.Config, "schema_extra", {"example": _UPDATE_VERSION_EXAMPLE})
 
 # Attach example for MeasurementUpload
