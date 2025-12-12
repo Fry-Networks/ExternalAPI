@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import importlib.util
 import logging
 import os
@@ -1722,7 +1722,7 @@ def get_required_version(
     tags=["Installers"],
 )
 def list_supported_installers(
-    os: str = Path(..., description="Operating system identifier (e.g., 'linux', 'windows')"),
+    os: str = Path(..., description="Operating system identifier (e.g., 'windows', 'linux', 'test-windows', 'test-linux')"),
     token: str = Depends(verify_bearer_token_general)
 ) -> InstallerSupportResponse:
     normalized = (os or "").strip().lower()

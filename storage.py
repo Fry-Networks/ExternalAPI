@@ -90,9 +90,9 @@ class InMemoryStore:
 
     def list_supported_installers(self, os_name: str) -> List[str]:
         """Return miner codes that have installer metadata for the requested OS."""
-        normalized = self._normalize_platform_key(os_name)
-        if normalized not in ("linux", "windows"):
-            raise ValueError("OS must be provided")
+        normalized = (os_name or "").strip().lower()
+        if normalized not in ("linux", "windows", "test-linux", "test-windows"):
+            raise ValueError("OS must be one of: 'linux', 'windows', 'test-linux', 'test-windows'")
 
         with self._lock:
             supported: List[str] = []
@@ -477,31 +477,16 @@ class MongoStore:
         self.update_version_document(miner_code=miner_code, updates=payload)
 
     def list_supported_installers(self, os_name: str) -> List[str]:
-        """Query versions collection for miner codes with installer metadata."""
-        normalized = self._normalize_platform_key(os_name)
-        if normalized not in ("linux", "windows"):
-            raise ValueError("OS must be provided")
+        """Query versions collection for miner codes with installer metadata for the given OS."""
+        normalized = (os_name or "").strip().lower()
+        if normalized not in ("linux", "windows", "test-linux", "test-windows"):
+            raise ValueError("OS must be one of: 'linux', 'windows', 'test-linux', 'test-windows'")
 
-        if normalized == "linux":
-            fields = [
-                f"{normalized}.software_version_needed",
-                f"{normalized}.poc_version_needed",
-                "linux_software_version_needed",
-                "linux_software_version",
-                "linux_poc_version_needed",
-                "linux_poc_version",
-            ]
-        else:
-            fields = [
-                f"{normalized}.software_version_needed",
-                f"{normalized}.poc_version_needed",
-                "software_version_needed",
-                "software_version",
-                "poc_version_needed",
-                "poc_version",
-            ]
-        or_clauses = [{field: {"$exists": True, "$nin": [None, ""]}} for field in fields]
-        query = {"$or": or_clauses}
+        # Map the OS name to the document field key
+        field_prefix = normalized.replace("-", "-")  # test-windows stays as test-windows
+        
+        # Check for the platform-specific fields in the document
+        query = {f"{field_prefix}.software_version_needed": {"$exists": True, "$nin": [None, ""]}}
         cursor = self._versions.find(query, {"_id": 0, "miner_code": 1})
         codes = {doc.get("miner_code") for doc in cursor if doc.get("miner_code")}
 
