@@ -1703,7 +1703,7 @@ def get_required_version(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to load version data")
 
     if version_data is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Miner code not found")
+        return VersionResponse(miner_code=miner_code.value, detail="none")
 
     if normalized_platform:
         platform_section = version_data.get(normalized_platform)
