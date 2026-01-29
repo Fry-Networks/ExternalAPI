@@ -83,7 +83,7 @@ _LEASE_RESPONSE_EXAMPLE = {
 }
 
 
-_LEASE_ACTION_EXAMPLE = {"lease_seconds": 900}
+_LEASE_ACTION_EXAMPLE = {"lease_seconds": 900, "mode": "acquire", "external_ip": "203.0.113.5"}
 
 
 _HARDWARE_DOCUMENT_EXAMPLE = {"document": {"mac": "AA:BB:CC:DD:EE:FF", "serial": "SN123", "software": "1.2.3"}}
@@ -164,6 +164,10 @@ class VersionResponse(BaseModel):
     miner_code: Optional[str] = Field(
         default=None,
         description="Miner family code (e.g., 'BM').",
+    )
+    detail: Optional[str] = Field(
+        default=None,
+        description="Optional human-readable note when platform-specific data is missing.",
     )
     windows: Optional[VersionPlatformDetails] = Field(
         default=None,
@@ -284,8 +288,11 @@ class InstallationHeartbeat(BaseModel):
 
 class LeaseAction(BaseModel):
     lease_seconds: int = Field(default=900, ge=1, description="Lease duration in seconds")
+    external_ip: Optional[str] = Field(default=None, description="Optional external IP address (for BM one-per-IP enforcement)")
+    mode: Optional[str] = Field(default=None, description="Optional action mode (e.g., 'acquire' or 'renew')")
+
     class Config:
-        pass
+        extra = "allow"
 
 
 class LeaseResponse(BaseModel):

@@ -798,9 +798,12 @@ _ip_whitelist_nets: list = []
 
 def _is_whitelisted(ip: str) -> bool:
     try:
+        # Always whitelist localhost and private IPs
+        ip_obj = ipaddress.ip_address(ip)
+        if ip_obj.is_loopback or ip_obj.is_private:
+            return True
         if ip in _ip_whitelist_ips:
             return True
-        ip_obj = ipaddress.ip_address(ip)
         for net in _ip_whitelist_nets:
             try:
                 if ip_obj in net:
@@ -1704,12 +1707,15 @@ def get_required_version(
 
     if normalized_platform:
         platform_section = version_data.get(normalized_platform)
-        if not platform_section:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No version data for platform '{normalized_platform}'")
+        # If no platform-specific data exists, return a 200 with an empty/partial response
+        # rather than a 404. This makes clients simpler when a platform has no requirements.
         filtered: Dict[str, Any] = {"miner_code": version_data.get("miner_code", miner_code.value)}
         if version_data.get("_id") is not None:
             filtered["_id"] = version_data.get("_id")
-        filtered[normalized_platform] = platform_section
+        if platform_section:
+            filtered[normalized_platform] = platform_section
+        else:
+            filtered["detail"] = f"No version data for platform '{normalized_platform}'"
         return VersionResponse(**filtered)
 
     return VersionResponse(**version_data)
@@ -1942,6 +1948,57 @@ def delete_installation(
             detail=f"Installation record not found for miner_key={miner_key}, install_id={install_id}"
         )
     return GenericOk()
+
+
+@app.get(
+    "/installations/BM/ip/{external_ip}/status",
+    response_model=Dict[str, Any],
+    summary="Check BM external IP availability",
+    tags=["Installations"],
+)
+def check_bm_ip_availability(
+    external_ip: str = Path(..., description="External IP address to check"),
+    token: str = Depends(verify_bearer_token_general),
+) -> Dict[str, Any]:
+    """Check if an external IP already has an active Bandwidth Miner (BM) installation.
+
+    Returns: {"available": bool, "conflicting_miner_key": str|None}
+    """
+    # Validate external IP format
+    try:
+        ipaddress.ip_address(external_ip)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid IP address")
+
+    conflicting: Optional[str] = None
+    # Prefer store-provided lookup when available
+    if hasattr(STORE, "find_conflicting_miner_key_by_external_ip"):
+        try:
+            conflicting = STORE.find_conflicting_miner_key_by_external_ip("BM", external_ip)
+        except Exception:
+            conflicting = None
+    else:
+        # Best-effort fallback for stores exposing a simple in-memory dict
+        try:
+            installs = getattr(STORE, "_installations", None)
+            if isinstance(installs, dict):
+                for key, rec in installs.items():
+                    try:
+                        mk = key[0] if isinstance(key, tuple) else getattr(rec, "miner_key", None) or (rec.get("miner_key") if isinstance(rec, dict) else None)
+                        payload = None
+                        if isinstance(rec, dict):
+                            payload = rec
+                        else:
+                            payload = getattr(rec, "payload", None)
+                        if mk and isinstance(mk, str) and mk.startswith("BM") and isinstance(payload, dict) and payload.get("external_ip") == external_ip:
+                            conflicting = mk
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            conflicting = None
+
+    return {"available": conflicting is None, "conflicting_miner_key": conflicting}
 
 
 @app.post(

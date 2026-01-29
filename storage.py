@@ -228,6 +228,21 @@ class InMemoryStore:
             rec = InstallationRecord(miner_key=miner_key, install_id=install_id, payload=dict(payload))
             self._installations[(miner_key, install_id)] = rec
 
+    def find_conflicting_miner_key_by_external_ip(self, miner_code_prefix: str, external_ip: str) -> Optional[str]:
+        """Return a conflicting full miner_key (str) for the given external_ip when the
+        miner_key starts with miner_code_prefix (e.g., 'BM'), or None if no conflict.
+        """
+        with self._lock:
+            for rec in self._installations.values():
+                try:
+                    if isinstance(rec, InstallationRecord) and rec.miner_key and rec.miner_key.startswith(miner_code_prefix):
+                        payload = rec.payload or {}
+                        if payload.get("external_ip") == external_ip:
+                            return rec.miner_key
+                except Exception:
+                    continue
+        return None
+
     def delete_installation(self, miner_key: str, install_id: str) -> bool:
         """Delete an installation record. Returns True if deleted, False if not found."""
         with self._lock:
@@ -660,6 +675,21 @@ class MongoStore:
             del update_doc["$set"][k]
 
         self._installations.update_one(key, update_doc, upsert=True)
+
+    def find_conflicting_miner_key_by_external_ip(self, miner_code_prefix: str, external_ip: str) -> Optional[str]:
+        """Mongo-backed lookup for a conflicting miner_key by external_ip.
+
+        Returns the first matching miner_key (string) or None if none found.
+        """
+        try:
+            # match miner_key prefix (e.g., '^BM') and exact external_ip field
+            q = {"miner_key": {"$regex": f"^{miner_code_prefix}"}, "external_ip": external_ip}
+            doc = self._installations.find_one(q, {"miner_key": 1})
+            if doc:
+                return doc.get("miner_key")
+        except Exception:
+            pass
+        return None
 
     def delete_installation(self, miner_key: str, install_id: str) -> bool:
         """Delete an installation record. Returns True if deleted, False if not found."""
