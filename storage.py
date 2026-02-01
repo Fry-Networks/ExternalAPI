@@ -32,6 +32,7 @@ class LeaseRecord:
     expires_at: datetime
     last_seen_at: datetime
     history_payload: Dict[str, Any] = field(default_factory=dict)
+    external_ip: Optional[str] = None
 
     def ttl_seconds(self) -> int:
         return max(0, int((self.expires_at - datetime.now(timezone.utc)).total_seconds()))
@@ -229,18 +230,15 @@ class InMemoryStore:
             self._installations[(miner_key, install_id)] = rec
 
     def find_conflicting_miner_key_by_external_ip(self, miner_code_prefix: str, external_ip: str) -> Optional[str]:
-        """Return a conflicting full miner_key (str) for the given external_ip when the
-        miner_key starts with miner_code_prefix (e.g., 'BM'), or None if no conflict.
+        """Return a conflicting full miner_key (str) for the given external_ip when an
+        active lease exists whose miner_key starts with miner_code_prefix (e.g., 'BM'),
+        or None if no conflict.
         """
+        now = datetime.now(timezone.utc)
         with self._lock:
-            for rec in self._installations.values():
-                try:
-                    if isinstance(rec, InstallationRecord) and rec.miner_key and rec.miner_key.startswith(miner_code_prefix):
-                        payload = rec.payload or {}
-                        if payload.get("external_ip") == external_ip:
-                            return rec.miner_key
-                except Exception:
-                    continue
+            for mk, rec in self._leases.items():
+                if mk.startswith(miner_code_prefix) and rec.external_ip == external_ip and rec.expires_at > now:
+                    return mk
         return None
 
     def delete_installation(self, miner_key: str, install_id: str) -> bool:
@@ -259,7 +257,7 @@ class InMemoryStore:
 
     # ------------------------------------------------------------------
     # Leases
-    def acquire_lease(self, miner_key: str, install_id: str, lease_seconds: int) -> Tuple[bool, LeaseRecord]:
+    def acquire_lease(self, miner_key: str, install_id: str, lease_seconds: int, external_ip: Optional[str] = None) -> Tuple[bool, LeaseRecord]:
         now = datetime.now(timezone.utc)
         expiry = now + timedelta(seconds=max(lease_seconds, 1))
         with self._lock:
@@ -267,16 +265,25 @@ class InMemoryStore:
             if current:
                 if current.holder_install_id != install_id and current.expires_at > now:
                     return False, current
+            # BM one-per-IP enforcement: check if another active BM lease uses this IP
+            if external_ip and miner_key.startswith("BM"):
+                for mk, rec in self._leases.items():
+                    if mk == miner_key:
+                        continue
+                    if mk.startswith("BM") and rec.external_ip == external_ip and rec.expires_at > now:
+                        # Return a sentinel record with the conflicting miner_key
+                        return False, rec
             record = LeaseRecord(
                 miner_key=miner_key,
                 holder_install_id=install_id,
                 expires_at=expiry,
                 last_seen_at=now,
+                external_ip=external_ip if miner_key.startswith("BM") else None,
             )
             self._leases[miner_key] = record
             return True, record
 
-    def renew_lease(self, miner_key: str, install_id: str, lease_seconds: int) -> Tuple[bool, Optional[LeaseRecord]]:
+    def renew_lease(self, miner_key: str, install_id: str, lease_seconds: int, external_ip: Optional[str] = None) -> Tuple[bool, Optional[LeaseRecord]]:
         now = datetime.now(timezone.utc)
         with self._lock:
             current = self._leases.get(miner_key)
@@ -284,6 +291,9 @@ class InMemoryStore:
                 return False, current
             current.expires_at = now + timedelta(seconds=max(lease_seconds, 1))
             current.last_seen_at = now
+            # Update external_ip on BM leases
+            if external_ip is not None and miner_key.startswith("BM"):
+                current.external_ip = external_ip
             return True, current
 
     def lease_status(self, miner_key: str) -> Dict[str, Any]:
@@ -679,11 +689,16 @@ class MongoStore:
     def find_conflicting_miner_key_by_external_ip(self, miner_code_prefix: str, external_ip: str) -> Optional[str]:
         """Mongo-backed lookup for a conflicting miner_key by external_ip.
 
+        Only considers active leases (lease_expires_at > now).
         Returns the first matching miner_key (string) or None if none found.
         """
+        now = datetime.now(timezone.utc)
         try:
-            # match miner_key prefix (e.g., '^BM') and exact external_ip field
-            q = {"miner_key": {"$regex": f"^{miner_code_prefix}"}, "external_ip": external_ip}
+            q = {
+                "miner_key": {"$regex": f"^{miner_code_prefix}"},
+                "external_ip": external_ip,
+                "lease_expires_at": {"$gt": now},
+            }
             doc = self._installations.find_one(q, {"miner_key": 1})
             if doc:
                 return doc.get("miner_key")
@@ -697,14 +712,33 @@ class MongoStore:
         return result.deleted_count > 0
 
     # Leases
-    def acquire_lease(self, miner_key: str, install_id: str, lease_seconds: int) -> Tuple[bool, LeaseRecord]:
+    def acquire_lease(self, miner_key: str, install_id: str, lease_seconds: int, external_ip: Optional[str] = None) -> Tuple[bool, LeaseRecord]:
         # Single atomic conditional find_one_and_update that grants a lease only when:
         # - no active lease exists (lease_expires_at missing or <= now)
         # - the document is for this install_id
         # This eliminates the race window between check and update.
         now = datetime.now(timezone.utc)
         expiry = now + timedelta(seconds=max(lease_seconds, 1))
-        
+
+        # BM one-per-IP enforcement: check if another active BM lease uses this IP
+        is_bm = miner_key.startswith("BM")
+        if is_bm and external_ip:
+            conflict = self._installations.find_one({
+                "miner_key": {"$regex": "^BM", "$ne": miner_key},
+                "external_ip": external_ip,
+                "lease_expires_at": {"$gt": now},
+            })
+            if conflict:
+                print(f"[MongoStore] acquire_lease: IP_ALREADY_REGISTERED ({external_ip}) held by {conflict.get('miner_key')}")
+                rec = LeaseRecord(
+                    miner_key=conflict.get("miner_key", "unknown"),
+                    holder_install_id=conflict.get("lease_install_id", "unknown"),
+                    expires_at=conflict.get("lease_expires_at", now),
+                    last_seen_at=conflict.get("last_seen_at", now),
+                    external_ip=external_ip,
+                )
+                return False, rec
+
         # Prepare filter for the atomic operation
         # The $or condition ensures we only update when:
         # 1. This install_id already holds the lease (renew/extend), OR
@@ -718,7 +752,7 @@ class MongoStore:
                 {"lease_expires_at": {"$exists": False}}  # No lease
             ]
         }
-        
+
         update_doc = {
             "$set": {
                 "lease_expires_at": expiry,
@@ -728,23 +762,26 @@ class MongoStore:
             },
             "$setOnInsert": {"first_installed_at": now},
         }
-        
+        # Persist external_ip for BM miners
+        if is_bm and external_ip:
+            update_doc["$set"]["external_ip"] = external_ip
+
         try:
             # Atomic conditional update: only succeeds if no active lease or lease expired
             updated = self._installations.find_one_and_update(
-                filter_q, 
-                update_doc, 
-                upsert=True, 
+                filter_q,
+                update_doc,
+                upsert=True,
                 return_document=ReturnDocument.AFTER
             )
-            
+
             if updated:
                 print(f"[MongoStore] acquire_lease: atomic grant succeeded for {miner_key}/{install_id}")
-                
+
                 expires_val = updated.get("lease_expires_at")
                 last_seen = updated.get("last_seen_at", now)
-                return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=expires_val, last_seen_at=last_seen)
-            
+                return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=expires_val, last_seen_at=last_seen, external_ip=updated.get("external_ip"))
+
             # If updated is None, it means the condition failed (another active lease exists)
             print(f"[MongoStore] acquire_lease: atomic grant DENIED (active lease exists) for {miner_key}/{install_id}")
             # Find who currently holds the lease
@@ -753,70 +790,79 @@ class MongoStore:
             )
             if current_holder:
                 rec = LeaseRecord(
-                    miner_key=miner_key, 
+                    miner_key=miner_key,
                     holder_install_id=current_holder.get("lease_install_id", "unknown"),
                     expires_at=current_holder.get("lease_expires_at"),
                     last_seen_at=current_holder.get("last_seen_at", now)
                 )
                 return False, rec
-            
+
             # Edge case: no document returned but no active holder found either
             return False, LeaseRecord(miner_key=miner_key, holder_install_id="unknown", expires_at=now, last_seen_at=now)
-            
+
         except Exception as e:
             # On any error, fall back to best-effort non-atomic path
             print(f"[MongoStore] acquire_lease: FALLBACK to non-atomic (error: {e}) for {miner_key}/{install_id}")
             fallback_filter = {"miner_key": miner_key, "install_id": install_id}
+            fallback_set = {
+                "lease_expires_at": expiry,
+                "lease_install_id": install_id,
+                "last_seen_at": now,
+                "_lease": True
+            }
+            if is_bm and external_ip:
+                fallback_set["external_ip"] = external_ip
             try:
                 self._installations.update_one(
-                    fallback_filter, 
-                    {"$set": {
-                        "lease_expires_at": expiry, 
-                        "lease_install_id": install_id, 
-                        "last_seen_at": now, 
-                        "_lease": True
-                    }}, 
+                    fallback_filter,
+                    {"$set": fallback_set},
                     upsert=True
                 )
             except Exception:
                 pass
-            return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=expiry, last_seen_at=now)
+            return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=expiry, last_seen_at=now, external_ip=external_ip if is_bm else None)
 
-    def renew_lease(self, miner_key: str, install_id: str, lease_seconds: int) -> Tuple[bool, Optional[LeaseRecord]]:
+    def renew_lease(self, miner_key: str, install_id: str, lease_seconds: int, external_ip: Optional[str] = None) -> Tuple[bool, Optional[LeaseRecord]]:
         now = datetime.now(timezone.utc)
         new_expiry = now + timedelta(seconds=max(lease_seconds, 1))
-        
+        is_bm = miner_key.startswith("BM")
+
         # Atomic conditional renewal: only succeeds if this install_id currently holds the lease
         filter_q = {
-            "miner_key": miner_key, 
-            "install_id": install_id, 
+            "miner_key": miner_key,
+            "install_id": install_id,
             "lease_install_id": install_id
         }
-        
+
+        update_set: Dict[str, Any] = {"lease_expires_at": new_expiry, "last_seen_at": now}
+        # Update external_ip on BM leases
+        if is_bm and external_ip is not None:
+            update_set["external_ip"] = external_ip
+
         try:
             updated = self._installations.find_one_and_update(
-                filter_q, 
-                {"$set": {"lease_expires_at": new_expiry, "last_seen_at": now}}, 
+                filter_q,
+                {"$set": update_set},
                 return_document=ReturnDocument.AFTER
             )
-            
+
             if updated:
                 print(f"[MongoStore] renew_lease: atomic renewal succeeded for {miner_key}/{install_id}")
-                return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now)
-            
+                return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now, external_ip=updated.get("external_ip"))
+
             # Atomic renewal failed - not the current holder or doc missing
             print(f"[MongoStore] renew_lease: atomic renewal DENIED (not holder) for {miner_key}/{install_id}")
             current = self._installations.find_one({"miner_key": miner_key, "install_id": install_id})
             if current and current.get("lease_expires_at"):
                 rec = LeaseRecord(
-                    miner_key=miner_key, 
-                    holder_install_id=current.get("lease_install_id", "unknown"), 
-                    expires_at=current.get("lease_expires_at"), 
+                    miner_key=miner_key,
+                    holder_install_id=current.get("lease_install_id", "unknown"),
+                    expires_at=current.get("lease_expires_at"),
                     last_seen_at=current.get("last_seen_at", now)
                 )
                 return False, rec
             return False, None
-            
+
         except Exception as e:
             # Fallback non-atomic path
             print(f"[MongoStore] renew_lease: FALLBACK to non-atomic (error: {e}) for {miner_key}/{install_id}")
@@ -825,17 +871,17 @@ class MongoStore:
                 rec = None
                 if current and current.get("lease_expires_at"):
                     rec = LeaseRecord(
-                        miner_key=miner_key, 
-                        holder_install_id=current.get("lease_install_id", "unknown"), 
-                        expires_at=current.get("lease_expires_at"), 
+                        miner_key=miner_key,
+                        holder_install_id=current.get("lease_install_id", "unknown"),
+                        expires_at=current.get("lease_expires_at"),
                         last_seen_at=current.get("last_seen_at", now)
                     )
                 return False, rec
             self._installations.update_one(
-                {"miner_key": miner_key, "install_id": install_id}, 
-                {"$set": {"lease_expires_at": new_expiry, "last_seen_at": now}}
+                {"miner_key": miner_key, "install_id": install_id},
+                {"$set": update_set}
             )
-            return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now)
+            return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now, external_ip=external_ip if is_bm else None)
 
     def lease_status(self, miner_key: str) -> Dict[str, Any]:
         # find any installation doc for this miner with a lease that hasn't expired

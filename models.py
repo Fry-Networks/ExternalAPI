@@ -300,6 +300,7 @@ class LeaseResponse(BaseModel):
     expires_at: Optional[datetime] = Field(default=None, description="ISO expiry timestamp for the lease")
     holder_install_id: Optional[str] = Field(default=None, description="Install id currently holding the lease")
     ttl_seconds: Optional[int] = Field(default=None, description="Time-to-live in seconds for the active lease")
+    error_code: Optional[str] = Field(default=None, description="Error code when lease is denied (e.g. 'IP_ALREADY_REGISTERED')")
     class Config:
         pass
 

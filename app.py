@@ -2013,7 +2013,7 @@ def acquire_installation_lease(
     action: LeaseAction = Body(default_factory=LeaseAction),
     token: str = Depends(verify_bearer_token_leases)
 ) -> LeaseResponse:
-    granted, record = STORE.acquire_lease(miner_key, install_id, action.lease_seconds)
+    granted, record = STORE.acquire_lease(miner_key, install_id, action.lease_seconds, external_ip=action.external_ip)
     # Use the returned LeaseRecord (if provided) to avoid an extra status DB call.
     if record:
         expires_at = getattr(record, "expires_at", None)
@@ -2033,7 +2033,11 @@ def acquire_installation_lease(
             expires_iso = None
             ttl = 0
         status_payload = {"active": bool(granted), "holder_install_id": getattr(record, "holder_install_id", None), "expires_at": expires_iso, "ttl_seconds": ttl}
-        return LeaseResponse(granted=granted, **status_payload)
+        # BM IP conflict: if denied and the conflicting record belongs to a different miner_key, it's an IP conflict
+        error_code = None
+        if not granted and miner_key.startswith("BM") and action.external_ip and getattr(record, "miner_key", None) != miner_key:
+            error_code = "IP_ALREADY_REGISTERED"
+        return LeaseResponse(granted=granted, error_code=error_code, **status_payload)
     # fallback: ask the store for status
     logger.debug(f"acquire_installation_lease: FALLBACK calling STORE.lease_status for {miner_key}/{install_id}")
     status_payload = STORE.lease_status(miner_key)
@@ -2052,7 +2056,7 @@ def renew_installation_lease(
     action: LeaseAction = Body(default_factory=LeaseAction),
     token: str = Depends(verify_bearer_token_leases)
 ) -> LeaseResponse:
-    granted, record = STORE.renew_lease(miner_key, install_id, action.lease_seconds)
+    granted, record = STORE.renew_lease(miner_key, install_id, action.lease_seconds, external_ip=action.external_ip)
     # Use returned LeaseRecord to avoid an extra status call when possible
     if record:
         expires_at = getattr(record, "expires_at", None)
