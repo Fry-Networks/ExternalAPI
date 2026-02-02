@@ -95,6 +95,8 @@ from models import (
     MeasurementRecord,
     MysteriumKeystoreRequest,
     MysteriumKeystoreResponse,
+    RewardsParamsRequest,
+    RewardsParamsResponse,
 )
 from storage import STORE
 
@@ -1806,6 +1808,30 @@ def update_required_version(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     return VersionResponse(**updated_doc)
+
+
+@app.put(
+    "/admin/versions/{miner_code}/rewards",
+    response_model=RewardsParamsResponse,
+    summary="Set BM rewards multiplier parameters",
+    tags=["Admin"],
+)
+def update_rewards_params(
+    miner_code: MinerCode = Path(...),
+    body: RewardsParamsRequest = Body(...),
+    token: str = Depends(verify_bearer_token_admin)
+) -> RewardsParamsResponse:
+    """Set multiplier_base and multiplier_per_tool on the version document for a miner code."""
+    try:
+        STORE.update_rewards_params(miner_code.value, body.multiplier_base, body.multiplier_per_tool)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update rewards parameters")
+
+    return RewardsParamsResponse(
+        miner_code=miner_code.value,
+        multiplier_base=body.multiplier_base,
+        multiplier_per_tool=body.multiplier_per_tool,
+    )
 
 
 @app.get(

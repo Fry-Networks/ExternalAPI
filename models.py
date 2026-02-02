@@ -38,6 +38,8 @@ _VERSION_RESPONSE_EXAMPLE = {
         "software_version_needed": "linux-1.4.0",
         "poc_version_needed": "linux-1.1.0",
     },
+    "multiplier_base": 1.0,
+    "multiplier_per_tool": 0.5,
 }
 
 _INSTALLER_SUPPORT_EXAMPLE = {
@@ -186,6 +188,14 @@ class VersionResponse(BaseModel):
         default=None,
         alias="test-linux",
         description="Required versions for Linux test cohort.",
+    )
+    multiplier_base: Optional[float] = Field(
+        default=None,
+        description="Base multiplier for BM rewards.",
+    )
+    multiplier_per_tool: Optional[float] = Field(
+        default=None,
+        description="Per-tool multiplier for BM rewards.",
     )
 
     class Config:
@@ -366,6 +376,42 @@ class ExistsResponse(BaseModel):
     
     class Config:
         pass
+
+
+class RewardsParamsRequest(BaseModel):
+    """Request to set BM rewards multiplier parameters."""
+    multiplier_base: float = Field(..., description="Base multiplier for BM rewards")
+    multiplier_per_tool: float = Field(..., description="Per-tool multiplier for BM rewards")
+
+    class Config:
+        pass
+
+
+class RewardsParamsResponse(BaseModel):
+    """Response after updating BM rewards multiplier parameters."""
+    miner_code: str = Field(..., description="Miner code the params were set on")
+    multiplier_base: float = Field(..., description="Base multiplier for BM rewards")
+    multiplier_per_tool: float = Field(..., description="Per-tool multiplier for BM rewards")
+
+    class Config:
+        pass
+
+
+_REWARDS_PARAMS_REQUEST_EXAMPLE = {
+    "multiplier_base": 1.0,
+    "multiplier_per_tool": 0.5,
+}
+_REWARDS_PARAMS_RESPONSE_EXAMPLE = {
+    "miner_code": "BM",
+    "multiplier_base": 1.0,
+    "multiplier_per_tool": 0.5,
+}
+if _pyd_major >= 2:
+    setattr(RewardsParamsRequest.Config, "json_schema_extra", {"example": _REWARDS_PARAMS_REQUEST_EXAMPLE})
+    setattr(RewardsParamsResponse.Config, "json_schema_extra", {"example": _REWARDS_PARAMS_RESPONSE_EXAMPLE})
+else:
+    setattr(RewardsParamsRequest.Config, "schema_extra", {"example": _REWARDS_PARAMS_REQUEST_EXAMPLE})
+    setattr(RewardsParamsResponse.Config, "schema_extra", {"example": _REWARDS_PARAMS_RESPONSE_EXAMPLE})
 
 
 class UpdateVersionRequest(BaseModel):

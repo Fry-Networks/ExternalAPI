@@ -43,7 +43,7 @@ class InMemoryStore:
 
     def __init__(self) -> None:
         self._lock = RLock()
-        self._versions: Dict[str, Dict[str, Optional[str]]] = {}
+        self._versions: Dict[str, Dict[str, Any]] = {}
         self._miner_profiles: Dict[str, Dict[str, Any]] = {}
         self._installations: Dict[Tuple[str, str], InstallationRecord] = {}
         self._leases: Dict[str, LeaseRecord] = {}
@@ -209,6 +209,15 @@ class InMemoryStore:
             coerced["linux"] = linux_section
 
         return coerced
+
+    # ------------------------------------------------------------------
+    # Rewards parameters
+    def update_rewards_params(self, miner_code: str, multiplier_base: float, multiplier_per_tool: float) -> None:
+        """Set BM-style rewards multiplier parameters on the version document."""
+        with self._lock:
+            existing = self._versions.setdefault(miner_code.upper(), {})
+            existing["multiplier_base"] = multiplier_base
+            existing["multiplier_per_tool"] = multiplier_per_tool
 
     # ------------------------------------------------------------------
     # Miner credentials
@@ -602,6 +611,15 @@ class MongoStore:
             coerced["linux"] = linux_section
 
         return coerced
+
+    # Rewards parameters
+    def update_rewards_params(self, miner_code: str, multiplier_base: float, multiplier_per_tool: float) -> None:
+        """Set BM-style rewards multiplier parameters on the version document."""
+        self._versions.find_one_and_update(
+            {"miner_code": miner_code},
+            {"$set": {"multiplier_base": multiplier_base, "multiplier_per_tool": multiplier_per_tool}},
+            upsert=True,
+        )
 
     # Miner profiles - always use creds.hardware collection
     def get_miner_profile(self, miner_key: str) -> Dict[str, Any]:
