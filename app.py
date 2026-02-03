@@ -72,6 +72,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from fastapi.openapi.utils import get_openapi
 from fastapi.openapi.docs import get_swagger_ui_html
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -344,16 +345,13 @@ def verify_bearer_token_admin(request: Request, credentials: HTTPAuthorizationCr
     """Validate bearer token against API_BEARER_TOKEN_ADMIN environment variable.
 
     This token is intended for protecting admin-only endpoints (unblock/list operations).
-    Falls back to API_BEARER_TOKEN if API_BEARER_TOKEN_ADMIN is not configured (for smooth upgrades).
     """
     admin_token = os.getenv("API_BEARER_TOKEN_ADMIN")
-    general_token = os.getenv("API_BEARER_TOKEN")
 
-    # If no admin-specific token is configured, allow the general token only if present.
-    if not admin_token and not general_token:
+    if not admin_token:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="API_BEARER_TOKEN_ADMIN or API_BEARER_TOKEN not configured on server"
+            detail="API_BEARER_TOKEN_ADMIN not configured on server"
         )
 
     if not credentials:
@@ -364,13 +362,7 @@ def verify_bearer_token_admin(request: Request, credentials: HTTPAuthorizationCr
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Prefer admin_token if set; otherwise accept general_token
-    if admin_token:
-        valid = credentials.credentials == admin_token
-    else:
-        valid = credentials.credentials == general_token
-
-    if not valid:
+    if credentials.credentials != admin_token:
         request.state.auth_note = "INVALID TOKEN"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -770,6 +762,15 @@ app = FastAPI(
     openapi_url=None,  # Disable default openapi.json
 )
 
+# Ensure real client IPs are used when behind a trusted proxy (e.g., nginx).
+# Configure trusted proxy IPs via TRUSTED_PROXY_IPS env var (comma-separated).
+_trusted_proxy_env = os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").strip()
+if _trusted_proxy_env == "*":
+    _trusted_proxies: Any = "*"
+else:
+    _trusted_proxies = [h.strip() for h in _trusted_proxy_env.split(",") if h.strip()]
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxies)
+
 # Simple in-process tracker for repeated 404 probes and a temporary blocklist.
 # This is intended as a lightweight mitigation for opportunistic scanners.
 # Configurable via environment variables:
@@ -1016,7 +1017,7 @@ async def log_requests(request: Request, call_next):
     # Build the concise message. Format required:
     # [timestamp] - <IP> - [LEVEL_LABEL] <status> <METHOD> <PATH> - <AUTH_NOTE>
     # Build an extra suffix with query-string and a shortened user-agent when available
-    qs_suffix = f" - QS: ?{query_string}" if query_string else ""
+    qs_suffix = " - QS: [REDACTED]" if query_string else ""
     # Shorten User-Agent to avoid long clutter in console logs. Configurable via LOG_UA_MAXLEN.
     if user_agent:
         try:

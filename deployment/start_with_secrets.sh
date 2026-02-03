@@ -14,17 +14,19 @@ if ! command -v op &> /dev/null; then
     exit 1
 fi
 
-echo "Step 1: Checking 1Password authentication..."
+echo "Step 1: Loading 1Password service account token..."
 
-# Check if already signed in
-if op account list &> /dev/null; then
-    echo "✅ Already signed in to 1Password"
-else
-    echo "🔑 Please sign in to 1Password:"
-    echo "Run this command first: eval \$(op signin --account frynetworks)"
-    echo "Then run this script again."
+token_file="/etc/opt/hardwareapi/op_service_account_token"
+if [ ! -f "$token_file" ]; then
+    echo "❌ Error: 1Password service account token file not found: $token_file"
     exit 1
 fi
+
+# Read token without printing it
+OP_SERVICE_ACCOUNT_TOKEN="$(cat "$token_file")"
+export OP_SERVICE_ACCOUNT_TOKEN
+
+echo "✅ Service account token loaded"
 
 echo ""
 echo "Step 2: Loading .env and resolving any 1Password references..."

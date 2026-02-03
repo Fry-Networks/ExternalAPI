@@ -10,16 +10,17 @@ ExternalAPI/
 ├── models.py                  # Data models and schemas
 ├── storage.py                 # Storage backend (in-memory/MongoDB)
 ├── requirements.txt           # Python dependencies
-├── .env.production           # Production environment template
+├── Dockerfile                # Container image definition
+├── docker-compose.yml        # Docker Compose configuration
+├── op-entrypoint.sh          # Runtime op wrapper (Docker)
 ├── README.md                 # This file
 └── deployment/               # Deployment files
     ├── deploy.sh            # Automated VPS deployment script
     ├── quick-deploy.sh      # One-liner deployment script
-    ├── start_with_secrets.sh # Secure startup script with 1Password integration
+    ├── start_with_secrets.sh # Host startup script with 1Password service account token
     ├── ecosystem.config.js  # PM2 process manager configuration
     ├── hardware_exe_api.service # Systemd service definition
-    ├── Dockerfile          # Docker container definition
-    └── docker-compose.yml  # Docker Compose configuration
+    └── fail2ban            # Optional fail2ban integration
 ```
 
 ## Quick start (Development)
@@ -75,11 +76,24 @@ python -m uvicorn app:app --reload --host 127.0.0.1 --port 8080
 
 ### Manual Deployment Options
 
+#### Option 0: Docker (Recommended)
+```bash
+# 1) Ensure the 1Password service account token file exists on the host:
+#    /etc/opt/hardwareapi/op_service_account_token (root:root, 0400)
+#
+# 2) If you bind-mount ./logs into the container, ensure it is writable
+#    by the container user (UID 10001):
+#    sudo chown -R 10001:10001 /path/to/your/repo/logs
+#    sudo chmod 0750 /path/to/your/repo/logs
+#
+# 2) Configure environment in docker-compose.yml (op:// references).
+#
+# 3) Build and run
+docker compose up -d --build
+```
+
 #### Option 1: Using Secure Startup Script (Recommended)
 ```bash
-# First, sign in to 1Password
-eval $(op signin --account frynetworks)
-
 # Start the application with secure secret management
 ./deployment/start_with_secrets.sh
 ```
@@ -125,7 +139,13 @@ sudo certbot --nginx -d your-domain.com
 
 ## Environment Configuration
 
-Create a `.env` file in the application directory:
+### Docker (Compose)
+Configure environment variables directly in `docker-compose.yml` using `op://` references. The container entrypoint reads the service account token from `/run/secrets/op_service_account_token` and runs `op run -- python app.py`.
+
+If you are running behind nginx on the same host, set `TRUSTED_PROXY_IPS` to the Docker bridge IP (e.g., `172.17.0.1`) plus loopback addresses.
+
+### Non-Docker (Host)
+You can export environment variables or use a local `.env` (not committed):
 
 ```env
 # Production environment configuration
@@ -215,7 +235,7 @@ The API uses a simplified MongoDB structure:
 
 ## 1Password Secrets Integration
 
-You can keep secrets (like `MONGODB_URI`) out of plain text by using the 1Password CLI reference format in your `.env`.
+You can keep secrets (like `MONGODB_URI`) out of plain text by using the 1Password CLI reference format in your environment.
 
 Supported formats:
 ```env
@@ -224,7 +244,7 @@ MONGODB_URI=op/Vault/Item/field
 MONGODB_URI=op://Vault/Item/field
 ```
 
-On startup the app will try to resolve any `op/...` or `op://...` values using the `op read` command and replace the environment variable with the secret value. Make sure the `op` CLI is installed and you're signed in (see 1Password docs). If `op` is not available or the read fails, the original env value is left unchanged.
+On startup the app will try to resolve any `op/...` or `op://...` values using the `op read` command and replace the environment variable with the secret value. Make sure the `op` CLI is installed and that `OP_SERVICE_ACCOUNT_TOKEN` is set (the host script reads it from `/etc/opt/hardwareapi/op_service_account_token`). If `op` is not available or the read fails, the original env value is left unchanged.
 
 ## Monitoring and Maintenance
 
