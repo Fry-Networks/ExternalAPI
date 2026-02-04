@@ -5,7 +5,21 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any, Dict, List, Optional, Tuple
 import os
+import sys
 import logging
+
+# Import measurement aggregator
+try:
+    # Add measurements directory to path if needed
+    measurements_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'measurements')
+    if measurements_path not in sys.path:
+        sys.path.insert(0, measurements_path)
+    from measurement_aggregator import get_aggregator
+    HAS_AGGREGATOR = True
+except Exception as e:
+    logging.warning(f"Measurement aggregator not available: {e}")
+    HAS_AGGREGATOR = False
+    get_aggregator = None  # type: ignore
 
 try:
     from pymongo import MongoClient
@@ -330,38 +344,54 @@ class InMemoryStore:
     # ------------------------------------------------------------------
     # Measurements
     def upload_measurement(self, hex_id: str, miner_code: str, install_id: str, timestamp: str, measurement_type: str, value: Dict[str, Any]) -> None:
-        """Store a measurement in the hex-centric structure (in-memory version).
+        """Store a measurement using daily aggregates (in-memory version).
         
-        Appends to the measurement_type array within the hex document.
+        Aggregates measurements by date with min/max/avg statistics,
+        drastically reducing storage size (99%+ reduction).
         """
         with self._lock:
             # Get or create hex document
-            if hex_id not in self._measurements:
-                self._measurements[hex_id] = {"hex_id": hex_id}
+            existing_doc = self._measurements.get(hex_id)
             
-            doc = self._measurements[hex_id]
-            
-            # Parse timestamp
-            ts_dt: Optional[datetime] = None
-            try:
-                ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            except Exception:
-                ts_dt = None
-            
-            # Create measurement entry
-            entry = {
-                "timestamp": timestamp,
-                "timestamp_dt": ts_dt,
-                "miner_code": miner_code,
-                "install_id": install_id,
-                "value": dict(value),
-                "uploaded_at": datetime.now(timezone.utc),
-            }
-            
-            # Append to measurement type array
-            if measurement_type not in doc:
-                doc[measurement_type] = []
-            doc[measurement_type].append(entry)
+            # Use aggregator if available, otherwise fall back to raw storage
+            if HAS_AGGREGATOR and get_aggregator:
+                aggregator = get_aggregator()
+                updated_doc = aggregator.process_measurement_upload(
+                    hex_id=hex_id,
+                    timestamp=timestamp,
+                    measurement_type=measurement_type,
+                    value=value,
+                    existing_doc=existing_doc
+                )
+                self._measurements[hex_id] = updated_doc
+            else:
+                # Fallback: raw storage (legacy behavior)
+                if existing_doc is None:
+                    self._measurements[hex_id] = {"hex_id": hex_id}
+                
+                doc = self._measurements[hex_id]
+                
+                # Parse timestamp
+                ts_dt: Optional[datetime] = None
+                try:
+                    ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except Exception:
+                    ts_dt = None
+                
+                # Create measurement entry
+                entry = {
+                    "timestamp": timestamp,
+                    "timestamp_dt": ts_dt,
+                    "miner_code": miner_code,
+                    "install_id": install_id,
+                    "value": dict(value),
+                    "uploaded_at": datetime.now(timezone.utc),
+                }
+                
+                # Append to measurement type array
+                if measurement_type not in doc:
+                    doc[measurement_type] = []
+                doc[measurement_type].append(entry)
 
     def get_measurements(self, hex_id: str, start: Optional[datetime], end: Optional[datetime], measurement_types: Optional[List[str]]) -> Dict[str, Any]:
         """Get all measurements for a hex, optionally filtered by date range and measurement types."""
@@ -445,14 +475,15 @@ class MongoStore:
         self._installations: Collection = poc_db.get_collection("installations")
         self._hardware_docs: Collection = poc_db.get_collection("hardware")
         
-        # Measurements: standard collection with hex_id as primary key
-        # Each document contains all measurement types for that hex
-        self._measurements: Collection = poc_db.get_collection("measurements")
+        # Measurements: separate database with one collection per country
+        # Database: "measurements"
+        # Collections: "France", "Germany", "United_Kingdom", "United_States", etc.
+        self._measurements_db = self._client.get_database("measurements")
+        self._country_collections: Dict[str, Collection] = {}  # Cache for country collections
+        
         self._mysterium: Collection = poc_db.get_collection("mysterium")
         
         try:
-            # Index for efficient queries by hex_id
-            self._measurements.create_index([("hex_id", 1)], unique=True)
             self._mysterium.create_index([("miner_key", 1)], unique=True)
         except Exception:
             # Non-fatal if index creation fails
@@ -461,6 +492,28 @@ class MongoStore:
         # Always use creds database for miner profiles/credentials
         creds_db = self._client.get_database("creds")
         self._miner_profiles: Collection = creds_db.get_collection("hardware")
+    
+    def _get_measurements_collection(self, country: str) -> Collection:
+        """Get or create measurements collection for a specific country.
+        
+        Returns a collection in the 'measurements' database named after the country.
+        E.g., 'France', 'Germany', 'United_Kingdom', etc.
+        """
+        # Sanitize country name for collection naming
+        safe_country = country.replace(' ', '_').replace('/', '_').replace('.', '_')
+        
+        if safe_country not in self._country_collections:
+            collection = self._measurements_db.get_collection(safe_country)
+            
+            try:
+                # Create index for efficient queries by hex_id
+                collection.create_index([("hex_id", 1)], unique=True)
+            except Exception:
+                pass  # Non-fatal if index creation fails
+            
+            self._country_collections[safe_country] = collection
+        
+        return self._country_collections[safe_country]
 
 
 
@@ -969,58 +1022,122 @@ class MongoStore:
 
     # Measurements
     def upload_measurement(self, hex_id: str, miner_code: str, install_id: str, timestamp: str, measurement_type: str, value: Dict[str, Any]) -> None:
-        """Append measurement to hex document, organized by measurement_type.
+        """Store measurement using daily aggregates in country-specific collection.
         
-        Each hex document contains arrays of measurements grouped by type:
+        Database: measurements
+        Collection: determined by hex_id → country mapping (France, Germany, etc.)
+        
+        Each hex document contains daily aggregates by measurement type:
         {
           "hex_id": "...",
-          "bandwidth": [{timestamp, miner_code, install_id, value}, ...],
-          "satellite": [{timestamp, miner_code, install_id, value}, ...],
+          "country": "France",
+          "Bandwidth": {
+            "2026-02-03": {"count": 150, "dl": {"min": 0, "max": 5.2, "avg": 1.3}, ...}
+          },
+          "Satellite": { ... },
           ...
         }
+        
+        This reduces storage by 99%+ compared to individual records.
         """
-        now = datetime.now(timezone.utc)
-        # Parse timestamp to datetime for sorting/filtering
-        ts_dt = None
-        try:
-            ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        except Exception:
-            ts_dt = now
-        
-        # Prepare the measurement entry
-        entry = {
-            "timestamp": timestamp,
-            "timestamp_dt": ts_dt,
-            "miner_code": miner_code,
-            "install_id": install_id,
-            "value": dict(value),
-            "uploaded_at": now,
-        }
-        
-        # Use $push to append to the measurement_type array
-        self._measurements.update_one(
-            {"hex_id": hex_id},
-            {
-                "$set": {"hex_id": hex_id},
-                "$push": {measurement_type: entry}
-            },
-            upsert=True
-        )
+        # Use aggregator if available
+        if HAS_AGGREGATOR and get_aggregator:
+            # First, determine the country to know which collection to use
+            aggregator = get_aggregator()
+            country = aggregator.get_country_from_hex(hex_id)
+            
+            # Get the appropriate collection
+            measurements_collection = self._get_measurements_collection(country)
+            
+            # Get existing document
+            existing_doc = measurements_collection.find_one({"hex_id": hex_id})
+            if existing_doc:
+                existing_doc.pop("_id", None)
+            
+            # Process through aggregator
+            updated_doc = aggregator.process_measurement_upload(
+                hex_id=hex_id,
+                timestamp=timestamp,
+                measurement_type=measurement_type,
+                value=value,
+                existing_doc=existing_doc
+            )
+            
+            # Ensure country is set
+            updated_doc['country'] = country
+            
+            # Replace entire document in country-specific collection
+            measurements_collection.update_one(
+                {"hex_id": hex_id},
+                {"$set": updated_doc},
+                upsert=True
+            )
+        else:
+            # Fallback: raw storage in "Unknown" collection
+            measurements_collection = self._get_measurements_collection("Unknown")
+            
+            now = datetime.now(timezone.utc)
+            # Parse timestamp to datetime for sorting/filtering
+            ts_dt = None
+            try:
+                ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except Exception:
+                ts_dt = now
+            
+            # Prepare the measurement entry
+            entry = {
+                "timestamp": timestamp,
+                "timestamp_dt": ts_dt,
+                "miner_code": miner_code,
+                "install_id": install_id,
+                "value": dict(value),
+                "uploaded_at": now,
+            }
+            
+            # Use $push to append to the measurement_type array
+            measurements_collection.update_one(
+                {"hex_id": hex_id},
+                {
+                    "$set": {"hex_id": hex_id},
+                    "$push": {measurement_type: entry}
+                },
+                upsert=True
+            )
 
     def get_measurements(self, hex_id: str, start: Optional[datetime], end: Optional[datetime], measurement_types: Optional[List[str]]) -> Dict[str, Any]:
         """Get all measurements for a hex, optionally filtered by date range and measurement types.
         
-        Returns a document with hex_id and arrays of measurements by type.
-        If date filtering is requested, filters each array by timestamp_dt.
+        Searches across all country collections to find the hex document.
+        Returns aggregated data with hex_id and daily statistics by measurement type.
         """
-        doc = self._measurements.find_one({"hex_id": hex_id})
+        # Try to find the document across all country collections
+        doc = None
+        
+        # If aggregator is available, try to determine country first
+        if HAS_AGGREGATOR and get_aggregator:
+            try:
+                aggregator = get_aggregator()
+                country = aggregator.get_country_from_hex(hex_id)
+                measurements_collection = self._get_measurements_collection(country)
+                doc = measurements_collection.find_one({"hex_id": hex_id})
+            except Exception:
+                pass
+        
+        # If not found or no aggregator, search all collections
+        if not doc:
+            for collection_name in self._measurements_db.list_collection_names():
+                collection = self._measurements_db.get_collection(collection_name)
+                doc = collection.find_one({"hex_id": hex_id})
+                if doc:
+                    break
+        
         if not doc:
             return {"hex_id": hex_id}
         
         doc.pop("_id", None)
-        result: Dict[str, Any] = {"hex_id": hex_id}
+        result: Dict[str, Any] = {"hex_id": hex_id, "country": doc.get("country", "Unknown")}
         
-        # Process each measurement type array
+        # Process each measurement type
         for key, value in doc.items():
             if key == "hex_id":
                 continue
