@@ -57,6 +57,12 @@ _MINER_PROFILE_EXAMPLE = {
     "credentials_saved_at": "2025-10-21T06:00:00Z",
     "position": {"lat": 35.0, "lng": -120.0, "hexId": "abc123"},
     "position_saved_at": "2025-10-21T06:05:00Z",
+    "verified": True,
+}
+
+_VERIFIED_STATUS_EXAMPLE = {
+    "miner_key": "miner-key-abc",
+    "verified": True,
 }
 
 
@@ -266,10 +272,20 @@ class MinerProfileResponse(BaseModel):
     credentials_saved_at: Optional[datetime] = Field(default=None, description="When credentials were saved")
     position: Optional[Dict[str, Any]] = Field(default=None, description="Position object with lat/lng/hexId")
     position_saved_at: Optional[datetime] = Field(default=None, description="When position was recorded")
+    verified: bool = Field(default=False, description="Whether the miner has been verified")
 
     class Config:
         # Allow other fields so we can return the full document shape without failing validation
         extra = "allow"
+
+
+class VerifiedStatusResponse(BaseModel):
+    """Response for the verified status endpoint."""
+    miner_key: str = Field(..., description="Full miner key")
+    verified: bool = Field(default=False, description="Whether the miner has been verified")
+
+    class Config:
+        pass
 
 
 class InstallationHeartbeat(BaseModel):
@@ -357,6 +373,7 @@ _MODEL_EXAMPLES = [
     (MysteriumKeystoreResponse, _MYSTERIUM_KEYSTORE_RESPONSE_EXAMPLE),
     (InstallationHeartbeat, _INSTALLATION_HEARTBEAT_EXAMPLE),
     (MinerProfileResponse, _MINER_PROFILE_EXAMPLE),
+    (VerifiedStatusResponse, _VERIFIED_STATUS_EXAMPLE),
 ]
 
 for _model, _example in _MODEL_EXAMPLES:

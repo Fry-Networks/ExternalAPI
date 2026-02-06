@@ -98,6 +98,7 @@ from models import (
     MysteriumKeystoreResponse,
     RewardsParamsRequest,
     RewardsParamsResponse,
+    VerifiedStatusResponse,
 )
 from storage import STORE
 
@@ -1851,6 +1852,8 @@ def get_miner_profile(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Miner key '{miner_key}' not found in credentials store"
         )
+    # Default verified to False if not present
+    profile.setdefault("verified", False)
     return MinerProfileResponse(**profile)
 
 
@@ -1875,6 +1878,33 @@ def check_miner_exists(
     profile = STORE.get_miner_profile(miner_key)
     exists = profile.get("exists", False)
     return ExistsResponse(exists=exists)
+
+
+@app.get(
+    "/credentials/{miner_key}/verified",
+    response_model=VerifiedStatusResponse,
+    summary="Get miner verification status",
+    tags=["Credentials"],
+)
+def get_miner_verified_status(
+    miner_key: str = Path(..., description="Full miner key"),
+    token: str = Depends(verify_bearer_token_general)
+) -> VerifiedStatusResponse:
+    """Get the verification status of a miner.
+
+    Returns the miner_key and its verified status (true/false).
+    Defaults to false if the verified field is not set.
+    """
+    profile = STORE.get_miner_profile(miner_key)
+    if not profile.get("exists"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Miner key '{miner_key}' not found in credentials store"
+        )
+    return VerifiedStatusResponse(
+        miner_key=miner_key,
+        verified=profile.get("verified", False)
+    )
 
 
 @app.post(
