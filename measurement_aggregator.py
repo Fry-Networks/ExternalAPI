@@ -40,11 +40,11 @@ class MeasurementAggregator:
         else:
             try:
                 # Convert hex to coordinates
-                lat, lon = h3.cell_to_latlng(hex_id)
+                lat, lon = h3.cell_to_latlng(hex_id)  # type: ignore
                 
                 # Initialize geolocator on first use
                 if self._geolocator is None:
-                    self._geolocator = Nominatim(user_agent="hardware_poc_measurements")
+                    self._geolocator = Nominatim(user_agent="hardware_poc_measurements")  # type: ignore
                 
                 # Reverse geocode
                 location = self._geolocator.reverse(f"{lat}, {lon}", language='en', timeout=10)

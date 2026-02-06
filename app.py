@@ -770,7 +770,7 @@ if _trusted_proxy_env == "*":
     _trusted_proxies: Any = "*"
 else:
     _trusted_proxies = [h.strip() for h in _trusted_proxy_env.split(",") if h.strip()]
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxies)
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxies)  # type: ignore[arg-type]
 
 # Simple in-process tracker for repeated 404 probes and a temporary blocklist.
 # This is intended as a lightweight mitigation for opportunistic scanners.
@@ -2244,7 +2244,7 @@ def get_mysterium_keystore(
         )
 
     return MysteriumKeystoreResponse(
-        keystore_b64=record.get("keystore_b64"),
+        keystore_b64=record.get("keystore_b64") or "",
         identity_id=record.get("identity_id"),
     )
 
