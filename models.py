@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 from typing import List
 from enum import Enum
 
@@ -40,6 +40,7 @@ _VERSION_RESPONSE_EXAMPLE = {
     },
     "multiplier_base": 1.0,
     "multiplier_per_tool": 0.5,
+    "limit": 1,
 }
 
 _INSTALLER_SUPPORT_EXAMPLE = {
@@ -202,6 +203,10 @@ class VersionResponse(BaseModel):
     multiplier_per_tool: Optional[float] = Field(
         default=None,
         description="Per-tool multiplier for BM rewards.",
+    )
+    limit: Optional[Union[int, str]] = Field(
+        default=None,
+        description="Installation limit per IP. Numeric (1, 2, 5, 10, etc.) for specific limits, or 'no' for unlimited.",
     )
 
     class Config:
@@ -451,7 +456,11 @@ class UpdateVersionRequest(BaseModel):
         alias="test-linux",
         description="Version requirements for Linux test cohort.",
     )
-    
+    limit: Optional[Union[int, str]] = Field(
+        default=None,
+        description="Installation limit per IP. Numeric (1, 2, 5, 10, etc.) for specific limits, or 'no' for unlimited.",
+    )
+
     class Config:
         pass
 
@@ -484,6 +493,20 @@ class MeasurementListResponse(BaseModel):
         pass
 
 
+class PresearchNode(BaseModel):
+    miner_key: str = Field(..., description="Miner key")
+    node_key: str = Field(..., description="Public key of the node")
+    connected: bool = Field(..., description="Whether the node is connected")
+    blocked: bool = Field(..., description="Whether the node is blocked")
+    description: Optional[str] = Field(None, description="Node description from meta")
+
+
+class PresearchPayload(BaseModel):
+    ip: str = Field(..., description="Remote address")
+    timestamp: str = Field(..., description="ISO8601 UTC timestamp")
+    nodes: List[PresearchNode] = Field(..., description="List of Presearch nodes")
+
+
 # Attach example for ExistsResponse
 if _pyd_major >= 2:
     setattr(ExistsResponse.Config, "json_schema_extra", {"example": {"exists": True}})
@@ -495,6 +518,7 @@ _UPDATE_VERSION_EXAMPLE = {
     "windows": {"software_version_needed": "6.2.0", "poc_version_needed": "1.5.0"},
     "linux": {"software_version_needed": "linux-1.3.0"},
     "test-windows": {"software_version_needed": "6.3.0", "poc_version_needed": "1.6.0"},
+    "limit": 1,
 }
 if _pyd_major >= 2:
     setattr(UpdateVersionRequest.Config, "populate_by_name", True)

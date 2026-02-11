@@ -64,6 +64,7 @@ class InMemoryStore:
         self._hardware_docs: Dict[str, Dict[str, Any]] = {}
         self._measurements: Dict[str, Dict[str, Any]] = {}  # keyed by hex_id
         self._mysterium: Dict[str, Dict[str, Any]] = {}
+        self._presearch: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Version metadata
@@ -83,14 +84,17 @@ class InMemoryStore:
 
     def update_version_document(self, miner_code: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         """Merge platform-specific version updates into the stored document."""
+        limit_value = updates.get("limit")
         normalized_updates = self._normalize_updates(updates)
-        if not normalized_updates:
+        if not normalized_updates and limit_value is None:
             raise ValueError("No version fields provided")
 
         with self._lock:
             existing = dict(self._versions.get(miner_code.upper()) or {})
             merged = self._merge_version_doc(existing, normalized_updates)
             merged["miner_code"] = miner_code
+            if limit_value is not None:
+                merged["limit"] = limit_value
             self._versions[miner_code.upper()] = merged
             return self._coerce_version_sections(dict(merged))
 
@@ -264,6 +268,21 @@ class InMemoryStore:
                     return mk
         return None
 
+    def find_installations_by_external_ip(self, external_ip: str) -> List[Dict[str, Any]]:
+        """Return all active installations (leases) associated with the given external_ip."""
+        now = datetime.now(timezone.utc)
+        results: List[Dict[str, Any]] = []
+        with self._lock:
+            for mk, rec in self._leases.items():
+                if rec.external_ip == external_ip and rec.expires_at > now:
+                    results.append({
+                        "miner_key": mk,
+                        "install_id": rec.holder_install_id,
+                        "lease_expires_at": rec.expires_at.isoformat(),
+                        "last_seen_at": rec.last_seen_at.isoformat(),
+                    })
+        return results
+
     def delete_installation(self, miner_key: str, install_id: str) -> bool:
         """Delete an installation record. Returns True if deleted, False if not found."""
         with self._lock:
@@ -301,7 +320,7 @@ class InMemoryStore:
                 holder_install_id=install_id,
                 expires_at=expiry,
                 last_seen_at=now,
-                external_ip=external_ip if miner_key.startswith("BM") else None,
+                external_ip=external_ip,
             )
             self._leases[miner_key] = record
             return True, record
@@ -314,8 +333,7 @@ class InMemoryStore:
                 return False, current
             current.expires_at = now + timedelta(seconds=max(lease_seconds, 1))
             current.last_seen_at = now
-            # Update external_ip on BM leases
-            if external_ip is not None and miner_key.startswith("BM"):
+            if external_ip is not None:
                 current.external_ip = external_ip
             return True, current
 
@@ -340,6 +358,12 @@ class InMemoryStore:
     def put_hardware_doc(self, miner_key: str, document: Dict[str, Any]) -> None:
         with self._lock:
             self._hardware_docs[miner_key] = dict(document)
+
+    # ------------------------------------------------------------------
+    # Presearch
+    def put_presearch(self, ip: str, document: Dict[str, Any]) -> None:
+        with self._lock:
+            self._presearch[ip] = dict(document)
 
     # ------------------------------------------------------------------
     # Measurements
@@ -482,7 +506,8 @@ class MongoStore:
         self._country_collections: Dict[str, Collection] = {}  # Cache for country collections
         
         self._mysterium: Collection = poc_db.get_collection("mysterium")
-        
+        self._presearch: Collection = poc_db.get_collection("presearch")
+
         try:
             self._mysterium.create_index([("miner_key", 1)], unique=True)
         except Exception:
@@ -534,8 +559,9 @@ class MongoStore:
         return self._select_versions_by_platform(doc, normalized)
 
     def update_version_document(self, miner_code: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        limit_value = updates.get("limit")
         normalized_updates = self._normalize_updates(updates)
-        if not normalized_updates:
+        if not normalized_updates and limit_value is None:
             raise ValueError("No version fields provided")
 
         set_fields: Dict[str, Any] = {"miner_code": miner_code}
@@ -545,6 +571,8 @@ class MongoStore:
             for field in ("software_version_needed", "poc_version_needed"):
                 if payload.get(field) is not None:
                     set_fields[f"{platform_key}.{field}"] = payload[field]
+        if limit_value is not None:
+            set_fields["limit"] = limit_value
 
         updated = self._versions.find_one_and_update(
             {"miner_code": miner_code},
@@ -777,6 +805,29 @@ class MongoStore:
             pass
         return None
 
+    def find_installations_by_external_ip(self, external_ip: str) -> List[Dict[str, Any]]:
+        """Return all active installations associated with the given external_ip."""
+        now = datetime.now(timezone.utc)
+        results: List[Dict[str, Any]] = []
+        try:
+            cursor = self._installations.find(
+                {"external_ip": external_ip, "lease_expires_at": {"$gt": now}},
+                {"_id": 0, "miner_key": 1, "install_id": 1, "minerCode": 1,
+                 "lease_expires_at": 1, "last_seen_at": 1, "hostname": 1, "os": 1,
+                 "software_version_installed": 1, "poc_version_installed": 1},
+            )
+            for doc in cursor:
+                entry = dict(doc)
+                # Serialize datetimes
+                for dt_field in ("lease_expires_at", "last_seen_at"):
+                    val = entry.get(dt_field)
+                    if isinstance(val, datetime):
+                        entry[dt_field] = val.isoformat()
+                results.append(entry)
+        except Exception:
+            pass
+        return results
+
     def delete_installation(self, miner_key: str, install_id: str) -> bool:
         """Delete an installation record. Returns True if deleted, False if not found."""
         result = self._installations.delete_one({"miner_key": miner_key, "install_id": install_id})
@@ -833,8 +884,8 @@ class MongoStore:
             },
             "$setOnInsert": {"first_installed_at": now},
         }
-        # Persist external_ip for BM miners
-        if is_bm and external_ip:
+        # Persist external_ip for all miners (used for per-IP installation tracking)
+        if external_ip:
             update_doc["$set"]["external_ip"] = external_ip
 
         try:
@@ -881,7 +932,7 @@ class MongoStore:
                 "last_seen_at": now,
                 "_lease": True
             }
-            if is_bm and external_ip:
+            if external_ip:
                 fallback_set["external_ip"] = external_ip
             try:
                 self._installations.update_one(
@@ -891,12 +942,11 @@ class MongoStore:
                 )
             except Exception:
                 pass
-            return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=expiry, last_seen_at=now, external_ip=external_ip if is_bm else None)
+            return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=expiry, last_seen_at=now, external_ip=external_ip)
 
     def renew_lease(self, miner_key: str, install_id: str, lease_seconds: int, external_ip: Optional[str] = None) -> Tuple[bool, Optional[LeaseRecord]]:
         now = datetime.now(timezone.utc)
         new_expiry = now + timedelta(seconds=max(lease_seconds, 1))
-        is_bm = miner_key.startswith("BM")
 
         # Atomic conditional renewal: only succeeds if this install_id currently holds the lease
         filter_q = {
@@ -906,8 +956,7 @@ class MongoStore:
         }
 
         update_set: Dict[str, Any] = {"lease_expires_at": new_expiry, "last_seen_at": now}
-        # Update external_ip on BM leases
-        if is_bm and external_ip is not None:
+        if external_ip is not None:
             update_set["external_ip"] = external_ip
 
         try:
@@ -952,7 +1001,7 @@ class MongoStore:
                 {"miner_key": miner_key, "install_id": install_id},
                 {"$set": update_set}
             )
-            return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now, external_ip=external_ip if is_bm else None)
+            return True, LeaseRecord(miner_key=miner_key, holder_install_id=install_id, expires_at=new_expiry, last_seen_at=now, external_ip=external_ip)
 
     def lease_status(self, miner_key: str) -> Dict[str, Any]:
         # find any installation doc for this miner with a lease that hasn't expired
@@ -1019,6 +1068,12 @@ class MongoStore:
         doc = dict(document)
         doc["miner_key"] = miner_key
         self._hardware_docs.update_one({"miner_key": miner_key}, {"$set": doc}, upsert=True)
+
+    # Presearch
+    def put_presearch(self, ip: str, document: Dict[str, Any]) -> None:
+        doc = dict(document)
+        doc["ip"] = ip
+        self._presearch.update_one({"ip": ip}, {"$set": doc}, upsert=True)
 
     # Measurements
     def upload_measurement(self, hex_id: str, miner_code: str, install_id: str, timestamp: str, measurement_type: str, value: Dict[str, Any]) -> None:

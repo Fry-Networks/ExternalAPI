@@ -96,6 +96,7 @@ from models import (
     MeasurementRecord,
     MysteriumKeystoreRequest,
     MysteriumKeystoreResponse,
+    PresearchPayload,
     RewardsParamsRequest,
     RewardsParamsResponse,
     VerifiedStatusResponse,
@@ -1782,10 +1783,13 @@ def update_required_version(
         if data:
             update_payload[alias] = data
 
+    if update.limit is not None:
+        update_payload["limit"] = update.limit
+
     if not update_payload:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one platform section must be provided"
+            detail="At least one platform section or limit must be provided"
         )
 
     # Handle ALL case - update all miner codes
@@ -2008,18 +2012,19 @@ def delete_installation(
 
 
 @app.get(
-    "/installations/BM/ip/{external_ip}/status",
+    "/installations/ip/{external_ip}/status",
     response_model=Dict[str, Any],
-    summary="Check BM external IP availability",
+    summary="Check external IP installation status across all miner types",
     tags=["Installations"],
 )
-def check_bm_ip_availability(
+def check_ip_installation_status(
     external_ip: str = Path(..., description="External IP address to check"),
     token: str = Depends(verify_bearer_token_general),
 ) -> Dict[str, Any]:
-    """Check if an external IP already has an active Bandwidth Miner (BM) installation.
+    """Check active installations on an external IP, grouped by miner type.
 
-    Returns: {"available": bool, "conflicting_miner_key": str|None}
+    Returns installation counts, limits, and details for each miner type
+    that has active installations on the given IP.
     """
     # Validate external IP format
     try:
@@ -2027,35 +2032,45 @@ def check_bm_ip_availability(
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid IP address")
 
-    conflicting: Optional[str] = None
-    # Prefer store-provided lookup when available
-    if hasattr(STORE, "find_conflicting_miner_key_by_external_ip"):
-        try:
-            conflicting = STORE.find_conflicting_miner_key_by_external_ip("BM", external_ip)
-        except Exception:
-            conflicting = None
-    else:
-        # Best-effort fallback for stores exposing a simple in-memory dict
-        try:
-            installs = getattr(STORE, "_installations", None)
-            if isinstance(installs, dict):
-                for key, rec in installs.items():
-                    try:
-                        mk = key[0] if isinstance(key, tuple) else getattr(rec, "miner_key", None) or (rec.get("miner_key") if isinstance(rec, dict) else None)
-                        payload = None
-                        if isinstance(rec, dict):
-                            payload = rec
-                        else:
-                            payload = getattr(rec, "payload", None)
-                        if mk and isinstance(mk, str) and mk.startswith("BM") and isinstance(payload, dict) and payload.get("external_ip") == external_ip:
-                            conflicting = mk
-                            break
-                    except Exception:
-                        continue
-        except Exception:
-            conflicting = None
+    # Find all installations on this IP
+    installations: List[Dict[str, Any]] = []
+    try:
+        installations = STORE.find_installations_by_external_ip(external_ip)
+    except Exception:
+        installations = []
 
-    return {"available": conflicting is None, "conflicting_miner_key": conflicting}
+    # Group installations by miner type (derived from miner_key prefix or minerCode)
+    by_type: Dict[str, List[Dict[str, Any]]] = {}
+    for inst in installations:
+        miner_key = inst.get("miner_key", "")
+        miner_code = inst.get("minerCode")
+        if not miner_code:
+            # Derive from miner_key prefix (e.g. "BM-abc123" -> "BM")
+            miner_code = miner_key.split("-")[0] if "-" in miner_key else miner_key[:3]
+        by_type.setdefault(miner_code, []).append(inst)
+
+    # Build response with limit from version metadata
+    installations_by_type: Dict[str, Any] = {}
+    for miner_code, insts in by_type.items():
+        # Look up limit from version metadata
+        limit_value: Any = "no"
+        try:
+            version_doc = STORE.get_version_document(miner_code)
+            if version_doc and version_doc.get("limit") is not None:
+                limit_value = version_doc["limit"]
+        except Exception:
+            pass
+
+        installations_by_type[miner_code] = {
+            "count": len(insts),
+            "limit": limit_value,
+            "details": insts,
+        }
+
+    return {
+        "external_ip": external_ip,
+        "installations_by_type": installations_by_type,
+    }
 
 
 @app.post(
@@ -2186,6 +2201,25 @@ def put_hardware_doc(
     document.setdefault("miner_key", miner_key)
     document.setdefault("lastUpdated", utc_now().isoformat())
     STORE.put_hardware_doc(miner_key, document)
+    return GenericOk()
+
+
+@app.put(
+    "/presearch/ip/{ip}",
+    response_model=GenericOk,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Store Presearch node data for an IP",
+    tags=["Presearch"],
+)
+def put_presearch_ip(
+    ip: str,
+    payload: PresearchPayload,
+    token: str = Depends(verify_bearer_token_general)
+) -> GenericOk:
+    document = payload.model_dump() if hasattr(payload, 'model_dump') else payload.dict()
+    document["ip"] = ip
+    document.setdefault("timestamp", utc_now().isoformat())
+    STORE.put_presearch(ip, document)
     return GenericOk()
 
 
