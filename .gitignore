@@ -25,6 +25,7 @@ deployment/whitelist_ips.json
 # IDE/editor settings
 .idea/
 .vscode/
+.claude/
 
 # OS clutter
 .DS_Store
