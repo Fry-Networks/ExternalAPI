@@ -12,3 +12,7 @@ slowapi==0.1.9
 
 # Colored console output
 colorama==0.4.6
+
+# Measurement aggregation: hex → country lookup
+h3
+geopy

@@ -8,12 +8,8 @@ import os
 import sys
 import logging
 
-# Import measurement aggregator
+# Import measurement aggregator (lives in the same directory as storage.py)
 try:
-    # Add measurements directory to path if needed
-    measurements_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'measurements')
-    if measurements_path not in sys.path:
-        sys.path.insert(0, measurements_path)
     from measurement_aggregator import get_aggregator
     HAS_AGGREGATOR = True
 except Exception as e:
@@ -363,7 +359,17 @@ class InMemoryStore:
     # Presearch
     def put_presearch(self, ip: str, document: Dict[str, Any]) -> None:
         with self._lock:
-            self._presearch[ip] = dict(document)
+            existing = self._presearch.get(ip)
+            if existing and "nodes" in existing and "nodes" in document:
+                # Index existing nodes by node_key for fast lookup
+                merged = {n["node_key"]: n for n in existing["nodes"]}
+                for node in document["nodes"]:
+                    merged[node["node_key"]] = node
+                doc = dict(document)
+                doc["nodes"] = list(merged.values())
+                self._presearch[ip] = doc
+            else:
+                self._presearch[ip] = dict(document)
 
     # ------------------------------------------------------------------
     # Measurements
@@ -1071,9 +1077,21 @@ class MongoStore:
 
     # Presearch
     def put_presearch(self, ip: str, document: Dict[str, Any]) -> None:
-        doc = dict(document)
-        doc["ip"] = ip
-        self._presearch.update_one({"ip": ip}, {"$set": doc}, upsert=True)
+        incoming_nodes = document.get("nodes", [])
+        # Use $set for top-level fields, then merge nodes by node_key
+        top_level = {k: v for k, v in document.items() if k != "nodes"}
+        top_level["ip"] = ip
+
+        existing = self._presearch.find_one({"ip": ip})
+        if existing and "nodes" in existing:
+            merged = {n["node_key"]: n for n in existing["nodes"]}
+            for node in incoming_nodes:
+                merged[node["node_key"]] = node
+            top_level["nodes"] = list(merged.values())
+        else:
+            top_level["nodes"] = incoming_nodes
+
+        self._presearch.update_one({"ip": ip}, {"$set": top_level}, upsert=True)
 
     # Measurements
     def upload_measurement(self, hex_id: str, miner_code: str, install_id: str, timestamp: str, measurement_type: str, value: Dict[str, Any]) -> None:
