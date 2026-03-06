@@ -4,6 +4,9 @@ services:
       context: .
     ports:
       - "8084:8084"
+    dns:
+      - 100.100.100.100
+      - 8.8.8.8
     environment:
       PORT: "8084"
       HOST: "0.0.0.0"
