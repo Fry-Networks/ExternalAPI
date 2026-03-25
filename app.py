@@ -994,6 +994,9 @@ async def log_requests(request: Request, call_next):
         from fastapi.responses import PlainTextResponse
         return PlainTextResponse("Forbidden", status_code=403)
     response = await call_next(request)
+
+    # Prevent CDN (BunnyCDN) from caching API responses
+    response.headers["Cache-Control"] = "no-store"
     
     # Only log non-static endpoints and important status codes
     url_path = request.url.path

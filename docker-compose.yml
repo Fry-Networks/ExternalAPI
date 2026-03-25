@@ -13,11 +13,11 @@ services:
       UVICORN_RELOAD: "false"
       TRUSTED_PROXY_IPS: "172.17.0.1,127.0.0.1,::1"
       MONGO_CA_CERT_PATH: "/etc/ssl/mongo/mongo-ca.crt"
-      MONGODB_URI: "op://HardwareAPI/Secrets/MONGO_URI"
-      API_BEARER_TOKEN: "op://HardwareAPI/Secrets/API_BEARER_TOKEN"
-      API_BEARER_TOKEN_FLXTIME: "op://HardwareAPI/Secrets/API_BEARER_TOKEN_FLXTIME"
-      API_BEARER_TOKEN_ADMIN: "op://HardwareAPI/Secrets/API_BEARER_TOKEN_ADMIN"
-      API_BEARER_TOKEN_DROPWIRELESS: "op://HardwareAPI/Secrets/API_BEARER_TOKEN_DROPWIRELESS"
+      MONGODB_URI: "${MONGODB_URI:-op://HardwareAPI/Secrets/MONGO_URI}"
+      API_BEARER_TOKEN: "${API_BEARER_TOKEN:-op://HardwareAPI/Secrets/API_BEARER_TOKEN}"
+      API_BEARER_TOKEN_FLXTIME: "${API_BEARER_TOKEN_FLXTIME:-op://HardwareAPI/Secrets/API_BEARER_TOKEN_FLXTIME}"
+      API_BEARER_TOKEN_ADMIN: "${API_BEARER_TOKEN_ADMIN:-op://HardwareAPI/Secrets/API_BEARER_TOKEN_ADMIN}"
+      API_BEARER_TOKEN_DROPWIRELESS: "${API_BEARER_TOKEN_DROPWIRELESS:-op://HardwareAPI/Secrets/API_BEARER_TOKEN_DROPWIRELESS}"
       FLXTIME_RATE_LIMIT: "100/minute"
     secrets:
       - op_service_account_token
