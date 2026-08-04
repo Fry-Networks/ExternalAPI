@@ -23,7 +23,7 @@ Miner keys in the FryNetworks system follow a specific format that identifies th
 - `RDN-` - Reward Decentralization Node
 - `SDN-` - Storage Decentralization Node
 - `SVN-` - Storage Validator Node
-- `AEM-` - AI Edge Miner
+- `AEM-` - Fry Edge Miner
 - `IRM-` - Indoor Radiation Miner
 
 **Unique Identifier:**

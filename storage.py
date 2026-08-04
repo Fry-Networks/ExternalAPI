@@ -524,6 +524,10 @@ class MongoStore:
         creds_db = self._client.get_database("creds")
         self._miner_profiles: Collection = creds_db.get_collection("hardware")
     
+        # Fallback: main database devices (admin panel records)
+        main_db = self._client.get_database("main")
+        self._main_devices: Collection = main_db.get_collection("devices")
+    
     def _get_measurements_collection(self, country: str) -> Collection:
         """Get or create measurements collection for a specific country.
         
@@ -729,6 +733,14 @@ class MongoStore:
             
             # If not found, try hardware collection
             doc = self._hardware_docs.find_one({"miner_key": miner_key}) or self._hardware_docs.find_one({"minerKey": miner_key})
+            if doc:
+                doc = dict(doc)
+                doc.pop("_id", None)
+                doc.setdefault("exists", True)
+                return doc
+            
+            # Fallback 4: Check main.devices (admin panel device records)
+            doc = self._main_devices.find_one({"miner_key": miner_key}) or self._main_devices.find_one({"minerKey": miner_key})
             if doc:
                 doc = dict(doc)
                 doc.pop("_id", None)

@@ -607,7 +607,7 @@ async def lifespan(app: FastAPI):
             "RDN": "Reward Decentralization Node",
             "SDN": "Storage Decentralization Node",
             "SVN": "Storage Validator Node",
-            "AEM": "AI Edge Miner",
+            "AEM": "Fry Edge Miner",
             "IRM": "Indoor Radiation Miner",
         }
 

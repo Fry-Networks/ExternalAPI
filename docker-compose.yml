@@ -1,5 +1,6 @@
 services:
   hardware_exe_api:
+    restart: unless-stopped
     build:
       context: .
     ports:
